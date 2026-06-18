@@ -25,12 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # from the handler rather than crashing the whole function on load.
 _IMPORT_ERROR = None
 try:
-    from _core import run_inspection, MODEL, REASONING_EFFORT, WEB_SEARCH_CONTEXT_SIZE
+    from _core import run_inspection, MODEL
 except Exception as e:  # noqa: BLE001
     _IMPORT_ERROR = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
     run_inspection = None
     MODEL = "unknown"
-    REASONING_EFFORT = WEB_SEARCH_CONTEXT_SIZE = None
 
 
 class handler(BaseHTTPRequestHandler):
@@ -55,8 +54,6 @@ class handler(BaseHTTPRequestHandler):
         self._send(200, {
             "ok": _IMPORT_ERROR is None,
             "model": MODEL,
-            "reasoning_effort": REASONING_EFFORT,
-            "web_search_context_size": WEB_SEARCH_CONTEXT_SIZE,
             "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
             "auth_required": bool(os.environ.get("APP_PASSWORD")),
             "import_error": _IMPORT_ERROR,

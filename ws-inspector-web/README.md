@@ -82,28 +82,24 @@ Leave `APP_PASSWORD` unset only if you genuinely want it open.
   return a **504 / FUNCTION_INVOCATION_TIMEOUT**. See "Tuning for the timeout"
   below. There's no streaming here; it's a single request/response.
 
-## Tuning for the timeout
+## The timeout (and why we don't tune it away)
 
 Vercel's function duration cap is **60s on Hobby** (a hard limit) and up to
-**800s on Pro** with fluid compute. So there are two levers:
+**800s on Pro** with fluid compute. A thorough web-search run can exceed 60s.
 
-**1. Cut the run's latency (helps on any plan).** Set these env vars:
+We deliberately **do not** lower reasoning effort or `search_context_size` to
+fit the budget: those change the model's search/answer behavior, so the run
+would no longer faithfully model what the ChatGPT interface does — which is the
+whole point of this tool. The call uses the plain API defaults.
 
-| Env var | Default | Effect |
-| --- | --- | --- |
-| `OPENAI_REASONING_EFFORT` | `low` | `minimal` is fastest; `none` omits the param. Biggest latency lever with least loss to the consideration set. |
-| `WEB_SEARCH_CONTEXT_SIZE` | `medium` | `low` = fewer sources retrieved but faster; `high` = broadest but slowest. |
+That leaves only fidelity-preserving fixes for long runs, none of which touch
+the model's behavior:
 
-If you're still timing out on Hobby, try `OPENAI_REASONING_EFFORT=minimal` and
-`WEB_SEARCH_CONTEXT_SIZE=low`. (The call degrades gracefully if a model rejects
-either param.) The `GET /api/inspect` health check echoes the active values.
-
-**2. Raise the ceiling (Pro only).** Bump `maxDuration` in `vercel.json`:
-
-```json
-{ "functions": { "api/inspect.py": { "maxDuration": 300 } } }
-```
-
-On Hobby this is capped at 60 regardless. For runs that routinely take minutes,
-the right fix is a **background job** (kick off the run, poll for the result)
-backed by a small store like Vercel KV / Upstash — not built here.
+1. **Raise the ceiling (Pro).** Bump `maxDuration` in `vercel.json`
+   (`{ "functions": { "api/inspect.py": { "maxDuration": 300 } } }`). On Hobby
+   this is capped at 60 regardless.
+2. **Background job.** Kick off the run and poll for the result, backed by a
+   small store (Vercel KV / Upstash). This removes the HTTP-request time limit
+   entirely while keeping the run identical. Not built here — ask if you want it.
+3. **Run the CLI** (`../ws-inspector`) for heavy queries — no serverless time
+   limit at all.

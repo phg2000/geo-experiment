@@ -7,28 +7,18 @@ reconciliation. It returns a plain dict instead of printing or writing files.
 """
 
 import json
-import os
 import re
 import time
 
 # -- Model + tool config (verified against OpenAI docs 2026-06-18) -------------
+# Defaults are intentionally left at the API defaults so this run mirrors the
+# ChatGPT product as closely as possible. Do NOT add reasoning-effort or
+# search_context_size overrides here: they change the model's search/answer
+# behavior and would stop this from faithfully modeling what the interface does.
 MODEL = "gpt-5.5"
+WEB_SEARCH_TOOL = {"type": "web_search"}
 INCLUDE_FIELDS = ["web_search_call.action.sources"]
 SOURCES_MARKER = "=== SOURCES IN CONTEXT ==="
-
-# -- Latency knobs (matter under Vercel's function time limit) ------------------
-# gpt-5.5 is a reasoning model; lower reasoning effort is the biggest latency
-# win with the least loss to the consideration set. search_context_size trades
-# breadth of retrieved sources for speed. Both are overridable via env, and the
-# call degrades gracefully if a model rejects either.
-#   OPENAI_REASONING_EFFORT: minimal | low | medium | high | none   (default low)
-#   WEB_SEARCH_CONTEXT_SIZE: low | medium | high | none             (default medium)
-def _env_choice(name, default):
-    v = (os.environ.get(name) or default).strip().lower()
-    return None if v in ("", "none", "off") else v
-
-REASONING_EFFORT = _env_choice("OPENAI_REASONING_EFFORT", "low")
-WEB_SEARCH_CONTEXT_SIZE = _env_choice("WEB_SEARCH_CONTEXT_SIZE", "medium")
 
 # Shorter, web-friendly retry budget (long sleeps would eat the function timeout).
 MAX_RETRIES = 3
@@ -49,9 +39,9 @@ source use this exact, repeating block format so it can be parsed:
 
 - URL: <the full url>
   TITLE: <the page title if available, else "(unknown)">
-  EXCERPT: <a SHORT verbatim quote from the passage you were given for this \
-source — copy 1-2 sentences exactly as they appeared, do NOT paraphrase. Keep \
-it brief.>
+  EXCERPT: <the passage text you were given for this source, quoted VERBATIM. \
+Copy it exactly as it appeared in your context — do not summarize, paraphrase, \
+or shorten it. If it is long, include as much as you can.>
 
 Rules for this section:
 - Do NOT invent or guess URLs. Only list sources actually present in your context.
@@ -73,49 +63,24 @@ def build_input(user_query: str):
 # =============================================================================
 
 
-def build_tools(context_size):
-    tool = {"type": "web_search"}
-    if context_size:
-        tool["search_context_size"] = context_size
-    return [tool]
-
-
-def _create(client, user_query, reasoning_effort, context_size):
-    kwargs = dict(
-        model=MODEL,
-        tools=build_tools(context_size),
-        input=build_input(user_query),
-        include=INCLUDE_FIELDS,
-    )
-    if reasoning_effort:
-        kwargs["reasoning"] = {"effort": reasoning_effort}
-    return client.responses.create(**kwargs)
-
-
 def _call(client, user_query: str):
     from openai import (
         APIConnectionError,
         APITimeoutError,
-        BadRequestError,
         InternalServerError,
         RateLimitError,
     )
 
     transient = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
-    reasoning_effort = REASONING_EFFORT
-    context_size = WEB_SEARCH_CONTEXT_SIZE
     last_err = None
     for attempt in range(MAX_RETRIES):
         try:
-            return _create(client, user_query, reasoning_effort, context_size)
-        except BadRequestError as err:
-            # A model may reject the optional latency params. Drop them once and
-            # retry with a plain call rather than failing the whole request.
-            if reasoning_effort or context_size:
-                reasoning_effort = None
-                context_size = None
-                continue
-            raise
+            return client.responses.create(
+                model=MODEL,
+                tools=[WEB_SEARCH_TOOL],
+                input=build_input(user_query),
+                include=INCLUDE_FIELDS,
+            )
         except transient as err:
             last_err = err
             if attempt == MAX_RETRIES - 1:
