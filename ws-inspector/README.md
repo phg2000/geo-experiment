@@ -38,42 +38,65 @@ One query → one run. No loops, no batches, no analysis layer. Outputs land in
 - **Web-search tool type:** `{"type": "web_search"}` — the current/recommended
   hosted tool. The older `web_search_preview` is the legacy variant and is not
   used here.
+- **Include field:** `include=["web_search_call.action.sources"]` — returns the
+  runtime's list of consulted source URLs (the consideration set).
 - **Verified against OpenAI docs on:** **2026-06-18**
 
-Both were checked against OpenAI's web-search guide and models pages at build
-time. If OpenAI rotates the flagship model, update the `MODEL` constant — the
-tool type string is independent of the model.
+All three were checked against OpenAI's web-search guide and models pages at
+build time. If OpenAI rotates the flagship model, update the `MODEL` constant —
+the tool type and include strings are independent of the model.
 
 ## What each section means
+
+There are **three tiers of source data**, in descending order of trust:
 
 | Section | Source | Trust level |
 | --- | --- | --- |
 | Search queries | `web_search_call` items, `action.query` | factual (what the model issued) |
 | Final answer | the `message` item's `output_text`, before the sources marker | factual |
-| **Citations** | the answer text's `url_citation` annotations | **GROUND TRUTH** |
-| **Self-reported sources** | a `=== SOURCES IN CONTEXT ===` block the model is asked to append | **MODEL-REPORTED, UNVERIFIED** |
-| Reconciliation | normalized-URL set comparison of the two above | derived |
+| **Citations** | the answer text's `url_citation` annotations | **GROUND TRUTH** (cited) |
+| **Consideration set** | `web_search_call.action.sources`, via `include=[...]` | **RUNTIME-REPORTED** — actual URLs the tool surfaced, cited or not; cannot be confabulated by the model |
+| **Self-reported sources** | a `=== SOURCES IN CONTEXT ===` block the model is asked to append | **MODEL-REPORTED, UNVERIFIED** — its unique value is the verbatim excerpt text the API doesn't return |
+| Reconciliation | 3-way normalized-URL set comparison of the above | derived |
 | Usage | `response.usage` | factual |
 
-The reconciliation makes the gap explicit:
+**Why three tiers?** Citations tell you what the answer *cited*. The runtime
+consideration set (`action.sources`) tells you what web search *actually
+surfaced* to the model — independent of the model, so it can't be faked. The
+self-report is the only channel that carries the **passage text** the model
+read, but it's unverifiable on its own. Cross-checking the three is the point.
 
-- **in_both** — the model's self-report is corroborated by a real citation.
-- **citation_only** — actually cited, but the model omitted it from its own dump.
-- **self_report_only** — the model **claims** it saw a source it didn't cite.
-  This could be a genuine retrieved-but-not-cited source, **or** a
-  confabulation. **This tool does not resolve which — it only surfaces it.**
+The 3-way reconciliation makes the gaps explicit:
+
+- **consulted_not_cited** (`A − C`) — the runtime surfaced it but the answer
+  didn't cite it. These are the genuine *retrieved-but-not-cited* sources.
+- **cited_not_in_api** (`C − A`) — cited but missing from the runtime list.
+  Unexpected; flagged.
+- **self_report_corroborated** (`S ∩ A`) — the model listed it *and* the runtime
+  confirms it was consulted. Its excerpt text is now plausible.
+- **self_report_uncorroborated** (`S − A`) — the model claims a source the
+  runtime never reported. **Likely confabulated** (or paraphrased past URL
+  recognition). The runtime channel lets you catch this — pure self-report
+  could not.
 
 ## Limitations (read this)
 
 State plainly what you are and are NOT seeing:
 
-- **The API does not expose the retrieved SERP / candidate pool.** You see only
-  what reached the model's context — not the full set of pages web search
-  considered, ranked, and filtered upstream.
+- **The API exposes the consulted-URL set, but NOT the full SERP / candidate
+  pool.** `web_search_call.action.sources` gives you the URLs web search
+  surfaced *to the model* — a real consideration set, often larger than the
+  citations. It does **not** give you the pages that were retrieved, ranked, and
+  filtered out *upstream* of the model. So "consideration set" here means "what
+  reached the model," not "everything web search looked at."
+- **`action.sources` gives URLs/titles, not passage text.** To see the actual
+  text the model read per source you still depend on the model's self-report,
+  which is unverifiable — hence the third tier.
 - **The self-reported sources are bounded by the re-ranker.** They cannot reveal
   anything filtered out before it reached the model. They are also
   *model-reported*, so they may omit, paraphrase, or confabulate sources, and
-  must always be cross-checked against the structured citations.
+  must always be cross-checked against the runtime consideration set and the
+  structured citations.
 - **Citations are a lower bound on influence.** A source can shape the answer
   without earning an inline `url_citation`. So "not cited" ≠ "not used."
 - **Parsing of the self-reported section is best-effort.** Its format is

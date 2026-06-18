@@ -36,6 +36,11 @@ from pathlib import Path
 MODEL = "gpt-5.5"
 WEB_SEARCH_TOOL = {"type": "web_search"}
 
+# `include` fields requested from the Responses API. action.sources returns the
+# actual list of source URLs the web_search tool consulted (often more than the
+# citations). Verified against OpenAI docs on 2026-06-18.
+INCLUDE_FIELDS = ["web_search_call.action.sources"]
+
 # Marker the model is instructed to emit before its self-reported source dump.
 SOURCES_MARKER = "=== SOURCES IN CONTEXT ==="
 
@@ -66,7 +71,9 @@ source use this exact, repeating block format so it can be parsed:
 
 - URL: <the full url>
   TITLE: <the page title if available, else "(unknown)">
-  EXCERPT: <a short verbatim excerpt of the passage text, one or two sentences>
+  EXCERPT: <the passage text you were given for this source, quoted VERBATIM. \
+Copy it exactly as it appeared in your context — do not summarize, paraphrase, \
+or shorten it. If it is long, include as much as you can.>
 
 Rules for this section:
 - Do NOT invent or guess URLs. Only list sources actually present in your context.
@@ -114,6 +121,11 @@ def call_openai(client, user_query: str):
                 model=MODEL,
                 tools=[WEB_SEARCH_TOOL],
                 input=build_input(user_query),
+                # Ask the runtime to return the actual URLs the web_search tool
+                # surfaced to the model (the "consideration set"). This is
+                # runtime-reported, NOT model-narrated — the trustworthy middle
+                # tier between cited annotations and the model's self-report.
+                include=INCLUDE_FIELDS,
             )
         except transient as err:  # rate limit / transient server / network
             last_err = err
@@ -166,6 +178,44 @@ def extract_search_queries(output: list) -> list:
             elif isinstance(action.get("queries"), list):
                 queries.extend(str(x) for x in action["queries"] if x)
     return queries
+
+
+def extract_api_sources(output: list) -> list:
+    """Runtime-reported consideration set: action.sources[] from every
+    web_search_call item, in order, de-duplicated by URL (first wins).
+
+    These come from the tool runtime (requested via include=
+    ["web_search_call.action.sources"]) — NOT narrated by the model — so they
+    are a reliable list of what web search actually surfaced. Note: this gives
+    URLs/titles, not the passage text the model read.
+    """
+    sources = []
+    seen = set()
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "web_search_call":
+            continue
+        action = item.get("action") or {}
+        if not isinstance(action, dict):
+            continue
+        for src in action.get("sources", []) or []:
+            if not isinstance(src, dict):
+                # Some shapes may surface a bare URL string.
+                if isinstance(src, str) and src not in seen:
+                    seen.add(src)
+                    sources.append({"url": src, "title": None, "type": "url"})
+                continue
+            url = src.get("url")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            sources.append(
+                {
+                    "url": url,
+                    "title": src.get("title"),
+                    "type": src.get("type", "url"),
+                }
+            )
+    return sources
 
 
 def find_message_item(output: list):
@@ -394,37 +444,57 @@ def normalize_url(url):
         return url.strip().lower().rstrip("/")
 
 
-def reconcile(citations: list, self_reported: list) -> dict:
-    """Compare normalized URLs from ground-truth citations vs. self-reported set."""
-    cited = {}
-    for c in citations:
-        n = normalize_url(c.get("url"))
+def _url_index(items: list) -> dict:
+    """Map normalized-URL -> original URL (first occurrence wins)."""
+    idx = {}
+    for it in items:
+        n = normalize_url(it.get("url"))
         if n:
-            cited.setdefault(n, c.get("url"))
+            idx.setdefault(n, it.get("url"))
+    return idx
 
-    reported = {}
-    for s in self_reported:
-        n = normalize_url(s.get("url"))
-        if n:
-            reported.setdefault(n, s.get("url"))
 
-    cited_keys = set(cited)
-    reported_keys = set(reported)
+def reconcile(citations: list, api_sources: list, self_reported: list) -> dict:
+    """Three-way URL set comparison across the three trust tiers:
 
-    in_both = sorted(cited_keys & reported_keys)
-    citation_only = sorted(cited_keys - reported_keys)
-    self_report_only = sorted(reported_keys - cited_keys)
+      C = citations          (GROUND TRUTH — cited in the answer)
+      A = api_sources         (RUNTIME-REPORTED — consulted, cited or not)
+      S = self_reported       (MODEL-REPORTED — UNVERIFIED)
+
+    The interesting buckets:
+      - consulted_not_cited (A - C): genuine retrieved-but-not-cited sources.
+      - cited_not_in_api    (C - A): citation missing from runtime list (flag).
+      - self_report_corroborated   (S ∩ A): model's claim backed by the runtime.
+      - self_report_uncorroborated (S - A): model claims a source the runtime
+        never reported — likely confabulated (or paraphrased past recognition).
+    """
+    C = _url_index(citations)
+    A = _url_index(api_sources)
+    S = _url_index(self_reported)
+    ck, ak, sk = set(C), set(A), set(S)
+
+    def urls(index, keys):
+        return [index[k] for k in sorted(keys)]
 
     return {
-        "in_both": [cited[k] for k in in_both],
-        "citation_only": [cited[k] for k in citation_only],
-        "self_report_only": [reported[k] for k in self_report_only],
+        # Pairwise: citations vs runtime consideration set.
+        "cited_and_in_api": urls(C, ck & ak),
+        "consulted_not_cited": urls(A, ak - ck),       # the real "considered, uncited"
+        "cited_not_in_api": urls(C, ck - ak),          # unexpected; worth flagging
+        # Pairwise: model self-report vs runtime consideration set.
+        "self_report_corroborated": urls(S, sk & ak),
+        "self_report_uncorroborated": urls(S, sk - ak),  # likely confabulated
+        # Pairwise: model self-report vs citations (kept for continuity).
+        "self_report_matches_citation": urls(S, sk & ck),
         "counts": {
-            "citations": len(cited_keys),
-            "self_reported": len(reported_keys),
-            "in_both": len(in_both),
-            "citation_only": len(citation_only),
-            "self_report_only": len(self_report_only),
+            "citations": len(ck),
+            "api_sources": len(ak),
+            "self_reported": len(sk),
+            "cited_and_in_api": len(ck & ak),
+            "consulted_not_cited": len(ak - ck),
+            "cited_not_in_api": len(ck - ak),
+            "self_report_corroborated": len(sk & ak),
+            "self_report_uncorroborated": len(sk - ak),
         },
     }
 
@@ -451,7 +521,8 @@ def extract_usage(raw: dict) -> dict:
 # =============================================================================
 
 LABEL_CITATIONS = "CITATIONS — GROUND TRUTH (structured annotations)"
-LABEL_SELF = "SELF-REPORTED CONSIDERATION SET — MODEL-REPORTED, UNVERIFIED"
+LABEL_API = "CONSIDERATION SET — RUNTIME-REPORTED (web_search_call.action.sources)"
+LABEL_SELF = "SELF-REPORTED SOURCES — MODEL-REPORTED, UNVERIFIED"
 
 
 def _hr(char="=", n=78):
@@ -486,8 +557,21 @@ def print_terminal(result: dict):
     else:
         out.append("  (none)")
 
+    out.append(f"\n### {LABEL_API}")
+    out.append("  >> URLs the web_search tool actually surfaced (cited or not). "
+               "From the runtime, not the model.")
+    if result["api_sources"]:
+        for i, s in enumerate(result["api_sources"], 1):
+            out.append(f"  {i}. {s.get('url')}")
+            if s.get("title"):
+                out.append(f"     title: {s.get('title')}")
+    else:
+        out.append("  (none returned — model may not have searched, or the "
+                   "include field was unsupported)")
+
     out.append(f"\n### {LABEL_SELF}")
-    out.append("  >> These are the model's CLAIMS about what it saw. Not verified.")
+    out.append("  >> These are the model's CLAIMS about what it saw. Not verified. "
+               "Value here is the verbatim excerpt text, which the API does not return.")
     if result["self_reported_sources"]:
         for i, s in enumerate(result["self_reported_sources"], 1):
             url = s.get("url") or s.get("url_unrecoverable_note") or "(no url)"
@@ -501,23 +585,26 @@ def print_terminal(result: dict):
     if flags.get("partial_or_malformed"):
         out.append(f"  [!] FLAG: {' '.join(flags.get('notes', [])) or 'partial/malformed.'}")
 
-    out.append("\n### RECONCILIATION (normalized-URL set comparison)")
+    out.append("\n### RECONCILIATION (3-way, normalized-URL set comparison)")
     rec = result["reconciliation"]
     c = rec["counts"]
     out.append(
-        f"  citations={c['citations']}  self_reported={c['self_reported']}  "
-        f"in_both={c['in_both']}  citation_only={c['citation_only']}  "
-        f"self_report_only={c['self_report_only']}"
+        f"  citations={c['citations']}  api_sources={c['api_sources']}  "
+        f"self_reported={c['self_reported']}"
     )
-    out.append("  - in_both (self-report corroborated by a real citation):")
-    for u in rec["in_both"] or ["    (none)"]:
+    out.append("  -- citations vs runtime consideration set --")
+    out.append("  - consulted_not_cited (runtime surfaced it, answer did NOT cite it):")
+    for u in rec["consulted_not_cited"] or ["    (none)"]:
         out.append(f"      • {u}" if not u.startswith("    ") else u)
-    out.append("  - citation_only (cited, but model did NOT list it in its dump):")
-    for u in rec["citation_only"] or ["    (none)"]:
+    out.append("  - cited_not_in_api (cited but absent from runtime list — flag):")
+    for u in rec["cited_not_in_api"] or ["    (none)"]:
         out.append(f"      • {u}" if not u.startswith("    ") else u)
-    out.append("  - self_report_only (model CLAIMS it saw this but did NOT cite it):")
-    out.append("    >> could be retrieved-but-not-cited, OR confabulated. Unresolved.")
-    for u in rec["self_report_only"] or ["    (none)"]:
+    out.append("  -- model self-report vs runtime consideration set --")
+    out.append("  - self_report_corroborated (runtime confirms the model saw it):")
+    for u in rec["self_report_corroborated"] or ["    (none)"]:
+        out.append(f"      • {u}" if not u.startswith("    ") else u)
+    out.append("  - self_report_UNCORROBORATED (runtime never reported it — LIKELY CONFABULATED):")
+    for u in rec["self_report_uncorroborated"] or ["    (none)"]:
         out.append(f"      • {u}" if not u.startswith("    ") else u)
 
     out.append("\n### TOKEN USAGE")
@@ -575,12 +662,30 @@ def build_markdown(result: dict) -> str:
         lines.append("_(none)_")
     lines.append("")
 
-    lines.append("## Self-reported consideration set — MODEL-REPORTED, UNVERIFIED")
+    lines.append("## Consideration set — RUNTIME-REPORTED (`web_search_call.action.sources`)")
+    lines.append("")
+    lines.append("_The actual list of source URLs the web_search tool surfaced to the model "
+                 "(cited or not), returned by the runtime via "
+                 "`include=[\"web_search_call.action.sources\"]`. Not narrated by the model, "
+                 "so it cannot be confabulated — but it gives URLs/titles, **not** the "
+                 "passage text the model read._")
+    lines.append("")
+    if result["api_sources"]:
+        for i, s in enumerate(result["api_sources"], 1):
+            lines.append(f"{i}. [{s.get('title') or s.get('url')}]({s.get('url')})")
+            lines.append(f"   - url: `{s.get('url')}`")
+    else:
+        lines.append("_(none returned — the model may not have searched, or the "
+                     "include field was unsupported)_")
+    lines.append("")
+
+    lines.append("## Self-reported sources — MODEL-REPORTED, UNVERIFIED")
     lines.append("")
     lines.append("> ⚠️ **UNVERIFIED.** This section is parsed from text the *model* "
                  "appended to its own answer. It is the model's claim about what was in "
-                 "its context — it may omit, paraphrase, or confabulate sources. Cross-check "
-                 "against the ground-truth citations above.")
+                 "its context — it may omit, paraphrase, or confabulate sources. Its unique "
+                 "value is the **verbatim excerpt text** (which the API does not return); "
+                 "cross-check its URLs against the runtime consideration set above.")
     lines.append("")
     if result["self_reported_sources"]:
         for i, s in enumerate(result["self_reported_sources"], 1):
@@ -600,33 +705,46 @@ def build_markdown(result: dict) -> str:
             lines.append(f"- {n}")
         lines.append("")
 
-    lines.append("## Reconciliation (normalized-URL set comparison)")
+    lines.append("## Reconciliation (3-way, normalized-URL set comparison)")
+    lines.append("")
+    lines.append("Three tiers, descending trust: **C** = citations (ground truth), "
+                 "**A** = runtime consideration set, **S** = model self-report.")
     lines.append("")
     rec = result["reconciliation"]
     c = rec["counts"]
-    lines.append(f"| metric | count |")
-    lines.append(f"| --- | --- |")
-    lines.append(f"| citations (ground truth) | {c['citations']} |")
-    lines.append(f"| self-reported (unverified) | {c['self_reported']} |")
-    lines.append(f"| in both | {c['in_both']} |")
-    lines.append(f"| citation-only | {c['citation_only']} |")
-    lines.append(f"| self-report-only | {c['self_report_only']} |")
+    lines.append("| metric | count |")
+    lines.append("| --- | --- |")
+    lines.append(f"| citations (C) | {c['citations']} |")
+    lines.append(f"| api/runtime sources (A) | {c['api_sources']} |")
+    lines.append(f"| self-reported (S) | {c['self_reported']} |")
+    lines.append(f"| consulted_not_cited (A − C) | {c['consulted_not_cited']} |")
+    lines.append(f"| cited_not_in_api (C − A) | {c['cited_not_in_api']} |")
+    lines.append(f"| self_report_corroborated (S ∩ A) | {c['self_report_corroborated']} |")
+    lines.append(f"| self_report_uncorroborated (S − A) | {c['self_report_uncorroborated']} |")
     lines.append("")
-    lines.append("**in_both** — self-report corroborated by a real structured citation:")
-    for u in rec["in_both"] or ["_(none)_"]:
+    lines.append("**consulted_not_cited** — runtime surfaced it, but the answer did NOT cite it "
+                 "(genuine retrieved-but-not-cited sources):")
+    for u in rec["consulted_not_cited"] or ["_(none)_"]:
         lines.append(f"- {u}")
     lines.append("")
-    lines.append("**citation_only** — actually cited, but the model did NOT list it in its dump:")
-    for u in rec["citation_only"] or ["_(none)_"]:
+    lines.append("**cited_not_in_api** — cited in the answer but absent from the runtime source "
+                 "list (unexpected; worth flagging):")
+    for u in rec["cited_not_in_api"] or ["_(none)_"]:
         lines.append(f"- {u}")
     lines.append("")
-    lines.append("**self_report_only** — model CLAIMS it saw this but did NOT cite it:")
+    lines.append("**self_report_corroborated** — the model listed it AND the runtime confirms it "
+                 "was consulted (its excerpt text is now plausible):")
+    for u in rec["self_report_corroborated"] or ["_(none)_"]:
+        lines.append(f"- {u}")
     lines.append("")
-    lines.append("> This is the model's claim that it had a source in context that it didn't "
-                 "cite. It could be real (retrieved-but-not-cited) or confabulated. "
-                 "**This tool does not resolve which — it only surfaces the gap.**")
+    lines.append("**self_report_uncorroborated** — the model listed it but the runtime never "
+                 "reported it:")
     lines.append("")
-    for u in rec["self_report_only"] or ["_(none)_"]:
+    lines.append("> ⚠️ The runtime did not report consulting this URL, yet the model claims it as "
+                 "a source. **Likely confabulated** (or paraphrased past URL recognition). This is "
+                 "the bucket the runtime channel lets you catch that pure self-report could not.")
+    lines.append("")
+    for u in rec["self_report_uncorroborated"] or ["_(none)_"]:
         lines.append(f"- {u}")
     lines.append("")
 
@@ -686,12 +804,13 @@ def main():
     output = raw.get("output") or []
 
     search_queries = extract_search_queries(output)
+    api_sources = extract_api_sources(output)
     message = find_message_item(output)
     full_text, annotations = extract_message_text_and_annotations(message)
     citations = extract_citations(annotations)
     final_text, sources_block = split_answer_and_sources(full_text)
     self_reported, sr_flags = parse_self_reported_sources(sources_block)
-    reconciliation = reconcile(citations, self_reported)
+    reconciliation = reconcile(citations, api_sources, self_reported)
     usage = extract_usage(raw)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -707,6 +826,8 @@ def main():
         "final_text": final_text,
         "citations": citations,
         "citations_label": "ground truth (structured annotations)",
+        "api_sources": api_sources,
+        "api_sources_label": "runtime-reported consideration set (web_search_call.action.sources)",
         "self_reported_sources": self_reported,
         "self_reported_label": "model-reported, UNVERIFIED",
         "self_reported_flags": sr_flags,
