@@ -1,0 +1,10 @@
+# Run outputs are local artifacts; keep the dir but not its contents.
+runs/*
+!runs/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
