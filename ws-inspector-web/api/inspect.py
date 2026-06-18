@@ -1,12 +1,18 @@
 """
-Vercel Python serverless function.
+Vercel Python serverless function (background mode).
 
-  GET  /api/inspect  -> tiny health check (does the function load? is the key set?)
-  POST /api/inspect  -> run an inspection; body {"query": "...", "password": "..."}
+  GET  /api/inspect            -> health check (does the function load? key set?)
+  GET  /api/inspect?id=&query= -> poll a background run; returns status or result
+  POST /api/inspect            -> start a background run; body {"query","password"}
+                                  returns {"id","status"} immediately
+
+The run executes in OpenAI's background mode, so every call here returns
+near-instantly and never hits Vercel's function time limit. The browser polls
+the GET endpoint until the run completes.
 
 Env vars (set in Vercel project settings):
   OPENAI_API_KEY  (required) — billable OpenAI key; never hardcode.
-  APP_PASSWORD    (optional) — if set, requests must supply a matching password.
+  APP_PASSWORD    (optional) — if set, starting a run requires a matching password.
 """
 
 import json
@@ -14,21 +20,17 @@ import os
 import sys
 import traceback
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
-# Make sibling modules (_core.py) importable regardless of how Vercel sets the
-# working directory / sys.path. Without this, `from _core import ...` can fail
-# at load time, and Vercel then serves an opaque "A server error has occurred"
-# HTML page instead of our JSON.
+# Make sibling modules (_core.py) importable regardless of Vercel's working dir.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import defensively: if anything goes wrong, capture it and report it as JSON
-# from the handler rather than crashing the whole function on load.
 _IMPORT_ERROR = None
 try:
-    from _core import run_inspection, MODEL
+    from _core import start_inspection, poll_inspection, MODEL
 except Exception as e:  # noqa: BLE001
     _IMPORT_ERROR = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-    run_inspection = None
+    start_inspection = poll_inspection = None
     MODEL = "unknown"
 
 
@@ -49,15 +51,28 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        # Health check: open this route in a browser to confirm the function
-        # loaded and the env is wired up, without spending any OpenAI credits.
-        self._send(200, {
-            "ok": _IMPORT_ERROR is None,
-            "model": MODEL,
-            "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
-            "auth_required": bool(os.environ.get("APP_PASSWORD")),
-            "import_error": _IMPORT_ERROR,
-        })
+        params = parse_qs(urlparse(self.path).query)
+        run_id = (params.get("id") or [""])[0].strip()
+
+        # No id -> health check (no OpenAI cost).
+        if not run_id:
+            return self._send(200, {
+                "ok": _IMPORT_ERROR is None,
+                "model": MODEL,
+                "mode": "background",
+                "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
+                "auth_required": bool(os.environ.get("APP_PASSWORD")),
+                "import_error": _IMPORT_ERROR,
+            })
+
+        # Poll an existing background run.
+        if _IMPORT_ERROR is not None:
+            return self._send(500, {"error": "Function failed to load.", "detail": _IMPORT_ERROR})
+        query = (params.get("query") or [""])[0]
+        try:
+            return self._send(200, poll_inspection(run_id, query))
+        except Exception as e:  # invalid id, expired, network, etc.
+            return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
     def do_POST(self):
         if _IMPORT_ERROR is not None:
@@ -81,12 +96,9 @@ class handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": "Server is missing OPENAI_API_KEY env var."})
 
         try:
-            result = run_inspection(query)
-        except Exception as e:  # surface a clean, readable message to the browser
-            return self._send(502, {
-                "error": f"{type(e).__name__}: {e}",
-                "detail": traceback.format_exc(),
-            })
+            started = start_inspection(query)  # {id, status}
+        except Exception as e:
+            return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
-        result["_auth_required"] = bool(required)
-        return self._send(200, result)
+        started["_auth_required"] = bool(required)
+        return self._send(200, started)

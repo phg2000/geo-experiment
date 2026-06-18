@@ -16,16 +16,27 @@ for the full explanation of the three tiers and limitations.
 ws-inspector-web/
   index.html         # static frontend (vanilla JS, no build step)
   api/
-    inspect.py       # Vercel Python serverless function  -> POST /api/inspect
+    inspect.py       # Vercel Python serverless function (start + poll)
     _core.py         # shared parsing/reconciliation logic (underscore = not a route)
   requirements.txt   # openai
   vercel.json        # maxDuration = 60s
 ```
 
-The browser posts `{query, password}` to `/api/inspect`; the function calls
-OpenAI's Responses API with the hosted `web_search` tool, parses the response,
-and returns the structured result as JSON. Nothing is persisted server-side
-(serverless has no writable disk) — downloads are generated client-side.
+The run uses **OpenAI background mode**, so no single request waits on the long
+web-search job and Vercel's function time limit is never hit:
+
+1. `POST /api/inspect {query, password}` → calls `responses.create(..., background=True)`
+   and returns a job `id` immediately.
+2. The browser polls `GET /api/inspect?id=…&query=…` every ~3s → the function
+   calls `responses.retrieve(id)` and returns the status.
+3. When the run is `completed`, the same parse → 3-way reconcile runs and the
+   full structured result comes back; the browser renders it and offers downloads.
+
+It's the **same** API call (model, `web_search` tool, `include=action.sources`,
+default params) — `background=True` only defers collection, so the output is
+identical to a synchronous run. Nothing is persisted server-side (serverless has
+no writable disk); OpenAI retains the background result for ~10 minutes, and the
+`.json` / `.md` downloads are generated client-side.
 
 ## Deploy (fastest path)
 
@@ -82,24 +93,25 @@ Leave `APP_PASSWORD` unset only if you genuinely want it open.
   return a **504 / FUNCTION_INVOCATION_TIMEOUT**. See "Tuning for the timeout"
   below. There's no streaming here; it's a single request/response.
 
-## The timeout (and why we don't tune it away)
+## The timeout — solved via background mode
 
-Vercel's function duration cap is **60s on Hobby** (a hard limit) and up to
-**800s on Pro** with fluid compute. A thorough web-search run can exceed 60s.
+Vercel's function duration cap is **60s on Hobby** / up to **800s on Pro**, and
+a thorough web-search run can exceed 60s. This app sidesteps that entirely with
+OpenAI background mode (see Architecture above): every serverless call returns
+in well under a second, so even multi-minute runs work on Hobby. The browser
+polls until the job finishes.
 
 We deliberately **do not** lower reasoning effort or `search_context_size` to
-fit the budget: those change the model's search/answer behavior, so the run
-would no longer faithfully model what the ChatGPT interface does — which is the
-whole point of this tool. The call uses the plain API defaults.
+fit a time budget — those change the model's search/answer behavior, so the run
+would no longer faithfully model what the ChatGPT interface does. The call uses
+plain API defaults; background mode makes that affordable.
 
-That leaves only fidelity-preserving fixes for long runs, none of which touch
-the model's behavior:
+Notes and limits:
 
-1. **Raise the ceiling (Pro).** Bump `maxDuration` in `vercel.json`
-   (`{ "functions": { "api/inspect.py": { "maxDuration": 300 } } }`). On Hobby
-   this is capped at 60 regardless.
-2. **Background job.** Kick off the run and poll for the result, backed by a
-   small store (Vercel KV / Upstash). This removes the HTTP-request time limit
-   entirely while keeping the run identical. Not built here — ask if you want it.
-3. **Run the CLI** (`../ws-inspector`) for heavy queries — no serverless time
-   limit at all.
+- **Keep the tab open** while it polls. If you close it, the job still completes
+  on OpenAI's side, but this UI won't capture the result (it's client-driven).
+  The job `id` is shown during the run.
+- **~10-minute retention.** OpenAI holds a background result for about 10 min,
+  which is the polling window. Download the `.json` / `.md` to keep it.
+- For very heavy/repeated runs you can also use the CLI (`../ws-inspector`),
+  which has no serverless limits at all.

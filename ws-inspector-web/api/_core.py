@@ -363,19 +363,13 @@ def extract_usage(raw: dict) -> dict:
 # =============================================================================
 
 
-def run_inspection(query: str, include_raw: bool = True) -> dict:
-    """Run one web-search inspection and return the structured result dict.
+def build_result(raw: dict, query: str, include_raw: bool = True) -> dict:
+    """Parse a (completed) response dict into the structured result.
 
-    Assumes OPENAI_API_KEY is present in the environment (OpenAI() reads it).
-    Raises on hard failures; the caller maps that to an HTTP error.
+    Shared by the synchronous path and the background poll path — the parsing
+    is identical; only how/when we obtain `raw` differs.
     """
-    from openai import OpenAI
-
-    client = OpenAI()
-    response = _call(client, query)
-    raw = response_to_dict(response)
     output = raw.get("output") or []
-
     message = find_message_item(output)
     full_text, annotations = extract_message_text_and_annotations(message)
     final_text, sources_block = split_answer_and_sources(full_text)
@@ -384,7 +378,7 @@ def run_inspection(query: str, include_raw: bool = True) -> dict:
     self_reported, sr_flags = parse_self_reported_sources(sources_block)
 
     result = {
-        "model": MODEL,
+        "model": raw.get("model") or MODEL,
         "query": query,
         "search_queries": extract_search_queries(output),
         "final_text": final_text,
@@ -401,3 +395,75 @@ def run_inspection(query: str, include_raw: bool = True) -> dict:
     if include_raw:
         result["raw_response"] = raw
     return result
+
+
+def run_inspection(query: str, include_raw: bool = True) -> dict:
+    """Synchronous path: run one inspection start-to-finish (blocks until done).
+
+    Used by the CLI-style caller. The web app uses the background start/poll
+    pair below to avoid the serverless request time limit.
+    """
+    from openai import OpenAI
+
+    client = OpenAI()
+    response = _call(client, query)
+    return build_result(response_to_dict(response), query, include_raw)
+
+
+# -- Background mode (start + poll) --------------------------------------------
+# OpenAI runs the job on its own infra and holds the result (~10 min), so each
+# of our serverless calls returns near-instantly and never hits Vercel's
+# function time limit. This is the SAME call (model, web_search tool, include,
+# defaults) as the sync path — background=True only defers collection, so the
+# output is identical and fidelity to the product is preserved.
+
+_OK_STATES = {"completed"}
+_PENDING_STATES = {"queued", "in_progress"}
+
+
+def start_inspection(query: str) -> dict:
+    """Kick off a background run; return {id, status} immediately."""
+    from openai import (
+        OpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError,
+    )
+
+    transient = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
+    client = OpenAI()
+    last_err = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = client.responses.create(
+                model=MODEL,
+                tools=[WEB_SEARCH_TOOL],
+                input=build_input(query),
+                include=INCLUDE_FIELDS,
+                background=True,
+            )
+            raw = response_to_dict(resp)
+            return {"id": raw.get("id"), "status": raw.get("status") or "queued"}
+        except transient as err:
+            last_err = err
+            if attempt == MAX_RETRIES - 1:
+                break
+            time.sleep(BASE_BACKOFF * (2 ** attempt))
+    raise RuntimeError(f"Failed to start background run after {MAX_RETRIES} attempts: {last_err}")
+
+
+def poll_inspection(response_id: str, query: str) -> dict:
+    """Check a background run. While pending, return {status}. When done, return
+    {status: "completed", result: {...}}. On terminal failure, {status, error}."""
+    from openai import OpenAI
+
+    client = OpenAI()
+    raw = response_to_dict(client.responses.retrieve(response_id))
+    status = raw.get("status") or "in_progress"
+
+    if status in _OK_STATES:
+        return {"status": "completed", "result": build_result(raw, query)}
+    if status in _PENDING_STATES:
+        return {"status": status}
+
+    # Terminal failure (failed / cancelled / incomplete / expired / ...).
+    err = raw.get("error") or raw.get("incomplete_details") or {}
+    msg = err.get("message") if isinstance(err, dict) else str(err)
+    return {"status": status, "error": msg or f"Run ended with status '{status}'."}

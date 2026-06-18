@@ -79,7 +79,8 @@
     </div>
     <button type="submit" id="go">Inspect</button>
   </form>
-  <p class="note">Heads up: a run can take 30–60s (the model searches, reads, and writes a sources dump).
+  <p class="note">Heads up: the run executes in OpenAI background mode and can take a few minutes
+    (the model searches, reads, and writes a sources dump). Keep this tab open while it polls.
     It calls a billable OpenAI model.</p>
 
   <div id="status" class="status"></div>
@@ -89,51 +90,109 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let lastResult = null;
-let authRequired = false; // toggled true if server returns 401
+let pollTimer = null;
+let startTime = 0;
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_MS = 9 * 60 * 1000; // OpenAI retains background results ~10 min
+
+// Read a response as text first, then parse defensively: a crashed/timed-out
+// function returns a non-JSON page (e.g. "A server error has occurred"), which
+// would otherwise blow up res.json().
+async function readJson(res) {
+  const raw = await res.text();
+  try { return JSON.parse(raw); }
+  catch {
+    const hint = res.status === 504
+      ? "The function timed out (504)."
+      : `Server returned a non-JSON response (HTTP ${res.status}).`;
+    throw new Error(`${hint}\n\n${raw.slice(0, 300)}`);
+  }
+}
+function setStatus(html) { $("status").innerHTML = html; }
+function showError(msg) { $("results").innerHTML = `<div class="err">${escapeHtml(msg)}</div>`; }
+function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
 
 $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const query = $("query").value.trim();
   if (!query) return;
   const password = $("password") ? $("password").value : "";
+  stopPolling();
   $("go").disabled = true;
   $("results").innerHTML = "";
-  $("status").innerHTML = `<span class="spinner"></span>Running web search & inspecting… (up to ~60s)`;
+  setStatus(`<span class="spinner"></span>Starting run…`);
   try {
+    // 1) Start the background run; get back a job id immediately.
     const res = await fetch("/api/inspect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, password }),
     });
-    // Read as text first: a crashed/timed-out function returns a non-JSON
-    // page (e.g. "A server error has occurred" or a 504), which would otherwise
-    // blow up res.json(). Parse defensively and show something readable.
-    const raw = await res.text();
-    let data;
-    try { data = JSON.parse(raw); }
-    catch {
-      const hint = res.status === 504
-        ? "The run took longer than the 60s function limit (504). Try a simpler query or retry."
-        : `Server returned a non-JSON response (HTTP ${res.status}).`;
-      throw new Error(`${hint}\n\n${raw.slice(0, 300)}`);
-    }
+    const data = await readJson(res);
     if (res.status === 401) {
-      authRequired = true;
       $("pwRow").style.display = "flex";
       throw new Error("This instance is password-protected. Enter the password and try again.");
     }
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-    lastResult = data;
     if (data._auth_required) $("pwRow").style.display = "flex";
-    $("status").innerHTML = "";
-    render(data);
+    if (!data.id) throw new Error("Server did not return a job id.");
+    // 2) Poll until the run reaches a terminal state.
+    startPolling(data.id, query);
   } catch (err) {
-    $("status").innerHTML = "";
-    $("results").innerHTML = `<div class="err">${escapeHtml(err.message)}</div>`;
-  } finally {
+    setStatus("");
+    showError(err.message);
     $("go").disabled = false;
   }
 });
+
+function startPolling(id, query) {
+  startTime = Date.now();
+  const tick = async () => {
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    setStatus(
+      `<span class="spinner"></span>Running on OpenAI… ${elapsed}s elapsed` +
+      `<div class="note">Job id: <code>${escapeHtml(id)}</code> — keep this tab open. ` +
+      `Web search runs can take a few minutes.</div>`
+    );
+    if (Date.now() - startTime > MAX_POLL_MS) {
+      stopPolling();
+      showError(`Stopped polling after ~9 min. The job id is ${id} — it may still ` +
+                `finish on OpenAI's side, but results are only retained ~10 min.`);
+      $("go").disabled = false;
+      return;
+    }
+    try {
+      const url = `/api/inspect?id=${encodeURIComponent(id)}&query=${encodeURIComponent(query)}`;
+      const res = await fetch(url);
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data.error || `Poll failed (${res.status})`);
+
+      if (data.status === "completed" && data.result) {
+        stopPolling();
+        setStatus("");
+        $("go").disabled = false;
+        lastResult = data.result;
+        render(data.result);
+        return;
+      }
+      if (data.status && data.status !== "queued" && data.status !== "in_progress") {
+        stopPolling();
+        setStatus("");
+        $("go").disabled = false;
+        showError(`Run ended with status "${data.status}". ${data.error || ""}`);
+        return;
+      }
+      // still queued / in_progress -> schedule next poll
+      pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+    } catch (err) {
+      stopPolling();
+      setStatus("");
+      $("go").disabled = false;
+      showError(err.message);
+    }
+  };
+  tick();
+}
 
 function el(tag, cls, html) {
   const e = document.createElement(tag);
