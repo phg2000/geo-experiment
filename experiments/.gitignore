@@ -1,0 +1,4 @@
+# Batch outputs are local artifacts.
+runs/
+__pycache__/
+*.pyc
