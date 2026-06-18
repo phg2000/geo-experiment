@@ -455,7 +455,10 @@ def poll_inspection(response_id: str, query: str) -> dict:
     from openai import OpenAI
 
     client = OpenAI()
-    raw = response_to_dict(client.responses.retrieve(response_id))
+    # `include` is a per-request serialization directive: with background mode
+    # the sources are NOT in the creation response and must be re-requested here
+    # on retrieve, or action.sources comes back null. (openai-node issue #1676)
+    raw = response_to_dict(client.responses.retrieve(response_id, include=INCLUDE_FIELDS))
     status = raw.get("status") or "in_progress"
 
     if status in _OK_STATES:
