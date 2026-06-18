@@ -96,13 +96,15 @@ in the downloaded JSON too (`_request`).
 
 ### Bing comparison matrix (experiment B)
 
-Tick the **"Compare to Bing"** checkbox before inspecting (it's off by default,
-since it spends SerpAPI credits). When set, each completed run shows a Bing
-comparison section — auto-run for a single run, behind a **"Compare to Bing"**
-button per run in batch mode (so N runs don't fire N× SerpAPI calls without a
-click). It fetches Bing's ranked results (via SerpAPI's Bing engine,
-`GET /api/serp`, key server-side) for each of the run's search queries —
-geo-matched to the run's `user_location` — and draws a matrix:
+Tick the **"Compare to search engine"** checkbox before inspecting (off by
+default, since it spends API credits). When set, each completed run shows a
+comparison section with an **engine dropdown** — **Exa** (neural/relevance,
+default) or **Bing** (SerpAPI scrape) — auto-run for a single run, behind a
+**Compare** button per run in batch mode (so N runs don't fire N× API calls
+without a click). It fetches the chosen engine's ranked results
+(`GET /api/serp?provider=…`, keys server-side) for each of the run's search
+queries — Bing is geo-matched to the run's `user_location`; Exa is not
+geo-targeted — and draws a matrix:
 
 - **columns** = the run's search queries (vertical headers),
 - **rows** = Bing rank 1…30,
@@ -151,8 +153,11 @@ use the `experiments/` CLI instead.)
 4. Add environment variables (Project → Settings → Environment Variables):
    - `OPENAI_API_KEY` — **required**. Your billable OpenAI key. Never commit it.
    - `APP_PASSWORD` — **strongly recommended** (see below).
-   - `SERPAPI_KEY` — optional; enables the "Compare to Bing" matrix (experiment B).
-     Get one at https://serpapi.com (free ~100 searches/mo).
+   - `SERPAPI_KEY` — optional; enables the **Bing** engine in the comparison
+     matrix (experiment B). Get one at https://serpapi.com (free ~100/mo).
+   - `EXA_API_KEY` — optional; enables the **Exa** (neural) engine in the same
+     matrix. Get one at https://exa.ai (free credits). Whichever keys are set
+     appear as engine options.
 5. **Deploy.** Done — you get a `*.vercel.app` URL.
 
 No framework preset is needed; Vercel auto-detects the static `index.html` and

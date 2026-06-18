@@ -171,7 +171,7 @@
       </select>
     </label>
     <label class="wschk"><input type="checkbox" id="websearch" checked /> Web search</label>
-    <label class="wschk" title="After each run, fetch Bing's ranked results (SerpAPI) and draw the cited/consulted-vs-rank matrix. Spends SerpAPI credits."><input type="checkbox" id="bingcompare" /> Compare to Bing</label>
+    <label class="wschk" title="After each run, fetch a ranked SERP (Exa or Bing) and draw the cited/consulted-vs-rank matrix. Pick the engine in the results. Spends API credits."><input type="checkbox" id="bingcompare" /> Compare to search engine</label>
     <span id="modeHelp" class="modehelp"></span>
     <div class="locrow">
       <label>Location:
@@ -269,12 +269,13 @@ function formatLoc(ul) {
 }
 
 // ---- Experiment B: Bing comparison matrix -----------------------------------
-async function fetchSerp(q, cc, location) {
-  const cacheKey = `serp:${cc}:${q}`;
+async function fetchSerp(q, cc, location, provider) {
+  const cacheKey = `serp:${provider}:${cc}:${q}`;
   try { const c = sessionStorage.getItem(cacheKey); if (c) return JSON.parse(c); } catch {}
   const pw = ($("password") && $("password").value) || "";
-  const url = `/api/serp?q=${encodeURIComponent(q)}&cc=${encodeURIComponent(cc || "")}` +
-    `&location=${encodeURIComponent(location || "")}${pw ? "&password=" + encodeURIComponent(pw) : ""}`;
+  const url = `/api/serp?q=${encodeURIComponent(q)}&provider=${encodeURIComponent(provider)}` +
+    `&cc=${encodeURIComponent(cc || "")}&location=${encodeURIComponent(location || "")}` +
+    `${pw ? "&password=" + encodeURIComponent(pw) : ""}`;
   const res = await fetch(url);
   const data = await readJson(res);
   if (!res.ok) throw new Error(data.error || `SERP failed (${res.status})`);
@@ -282,24 +283,29 @@ async function fetchSerp(q, cc, location) {
   return data;
 }
 
-async function compareToBing(d, container) {
+const PROVIDER_LABELS = { bing: "Bing (SerpAPI)", exa: "Exa (neural)" };
+async function compareToBing(d, container, provider) {
+  provider = provider || "exa";
+  const label = PROVIDER_LABELS[provider] || provider;
   const queries = [...new Set((d.search_queries || []).filter(Boolean))];
   if (!queries.length) { container.textContent = "No search queries to compare."; return; }
   const loc = d.user_location || {};
   const cc = loc.country || "";
   const locLabel = formatLoc(loc);
-  container.innerHTML = `<span class="spinner"></span> Fetching Bing results for ${queries.length} queries…`;
+  container.innerHTML = `<span class="spinner"></span> Fetching ${escapeHtml(label)} results for ${queries.length} queries…`;
   try {
-    const serps = await Promise.all(queries.map((q) => fetchSerp(q, cc, locLabel)));
-    renderMatrix(d, queries, serps, container);
+    const serps = await Promise.all(queries.map((q) => fetchSerp(q, cc, locLabel, provider)));
+    renderMatrix(d, queries, serps, container, provider);
   } catch (err) {
     container.innerHTML = `<div class="err">${escapeHtml(err.message)}</div>`;
   }
 }
 
 const domainOf = (u) => { const l = looseUrl(u); return l ? l.split("/")[0] : null; };
-function renderMatrix(d, queries, serps, container, mode) {
+function renderMatrix(d, queries, serps, container, provider, mode) {
+  provider = provider || "exa";
   mode = mode || "page";  // "page" = host+path match; "domain" = same-site match
+  const eng = provider === "exa" ? "Exa" : provider === "bing" ? "Bing" : provider;
   const keyOf = mode === "domain" ? domainOf : looseUrl;
   // Match on the loose key, so www/scheme/tracking-param noise doesn't hide
   // genuine matches between the model's URLs and Bing's.
@@ -334,12 +340,12 @@ function renderMatrix(d, queries, serps, container, mode) {
   html += `<div class="legend">` +
     `<span><span class="sw" style="background:#2e9e6b"></span>cited (green)</span>` +
     `<span><span class="sw" style="background:#d2603a"></span>consulted, not cited (red)</span>` +
-    `<span><span class="sw" style="background:var(--panel2)"></span>Bing result, model didn't surface it</span>` +
+    `<span><span class="sw" style="background:var(--panel2)"></span>${eng} result, model didn't surface it</span>` +
     `<label class="wschk" style="margin-left:auto"><input type="checkbox" id="matchModeToggle"${mode === "domain" ? " checked" : ""}/> ` +
     `match by domain (looser — same site, any page)</label>` +
     `</div>`;
   if (!depth) {
-    container.innerHTML = html + `<div class="err">No Bing results returned (check SERPAPI_KEY, or all queries errored).</div>`;
+    container.innerHTML = html + `<div class="err">No ${eng} results returned (check the API key, or all queries errored).</div>`;
     return;
   }
 
@@ -354,7 +360,7 @@ function renderMatrix(d, queries, serps, container, mode) {
     cols.forEach((c) => {
       const item = c.ranks[r];
       if (!item) { html += `<td class="cell nodata" title="(no result at this rank)"></td>`; return; }
-      let cls = "blank", status = "Bing result; model did not surface it";
+      let cls = "blank", status = `${eng} result; model did not surface it`;
       if (item.norm && cited.has(item.norm)) { cls = "green"; status = "CITED"; }
       else if (item.norm && sources.has(item.norm)) { cls = "red"; status = "consulted, not cited"; }
       html += `<td class="cell ${cls}" title="#${r + 1} · ${escapeHtml(status)}\n${escapeHtml(item.url)}"></td>`;
@@ -365,20 +371,20 @@ function renderMatrix(d, queries, serps, container, mode) {
 
   html += `<div class="desc" style="margin-top:10px">` +
     `Matching by <b>${mode === "domain" ? "domain (same site)" : "page (host+path)"}</b>. Depth shown: top ${depth} per query. ` +
-    `<b>${consultedNotOnBing.length}</b> of ${sources.size} consulted ${mode === "domain" ? "domain" : "source"}(s) were NOT in any query's Bing top-${depth} ` +
+    `<b>${consultedNotOnBing.length}</b> of ${sources.size} consulted ${mode === "domain" ? "domain" : "source"}(s) were NOT in any query's ${eng} top-${depth} ` +
     `(re-ranking / tenant-mismatch / from a query variant) — so they have no cell here.</div>`;
   html += `<div class="desc">Domain-level overlap (regardless of page): ` +
-    `<b>${domOverlap.length}</b> of ${consultedDomains.size} consulted domains also appear in Bing's top-${depth} ` +
+    `<b>${domOverlap.length}</b> of ${consultedDomains.size} consulted domains also appear in ${eng}'s top-${depth} ` +
     `(${bingDomains.size} distinct domains across all queries).` +
     (domOverlap.length ? ` Shared: ${domOverlap.slice(0, 20).map(escapeHtml).join(", ")}${domOverlap.length > 20 ? "…" : ""}.` : "") +
     `</div>`;
   if (consultedNotOnBing.length) {
-    html += `<details style="margin-top:6px"><summary>show the ${consultedNotOnBing.length} not on Bing</summary>` +
+    html += `<details style="margin-top:6px"><summary>show the ${consultedNotOnBing.length} not on ${eng}</summary>` +
       `<ul>${consultedNotOnBing.map((u) => `<li>${urlLine("https://" + u)}</li>`).join("")}</ul></details>`;
   }
 
-  // Raw Bing results per query, so you can eyeball matches the keying might miss.
-  html += `<details style="margin-top:12px"><summary>Bing results per query (raw — ${cols.length} queries)</summary>`;
+  // Raw results per query, so you can eyeball matches the keying might miss.
+  html += `<details style="margin-top:12px"><summary>${eng} results per query (raw — ${cols.length} queries)</summary>`;
   cols.forEach((c) => {
     html += `<div style="margin:10px 0 4px"><div class="q" style="font-weight:600">${escapeHtml(c.q)}` +
       `${c.err ? ` — <span class="err">${escapeHtml(c.err)}</span>` : ""}</div>`;
@@ -403,7 +409,7 @@ function renderMatrix(d, queries, serps, container, mode) {
 
   container.innerHTML = html;
   const tog = container.querySelector("#matchModeToggle");
-  if (tog) tog.onchange = () => renderMatrix(d, queries, serps, container, tog.checked ? "domain" : "page");
+  if (tog) tog.onchange = () => renderMatrix(d, queries, serps, container, provider, tog.checked ? "domain" : "page");
 }
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 9 * 60 * 1000; // OpenAI retains background results ~10 min
@@ -820,24 +826,32 @@ function render(d, root) {
   s.append(grid);
   root.append(s);
 
-  // Bing comparison (experiment B) — only when opted in via the form checkbox.
+  // Search-engine comparison (experiment B) — only when opted in via the checkbox.
   if (d._bingCompare) {
     s = el("section");
-    s.append(el("h2", null, "Bing comparison (SerpAPI) — experiment B"));
-    s.append(el("div", "desc", "Fetch Bing's ranked results for each of this run's search queries, then color each rank/query cell: " +
+    s.append(el("h2", null, "Search-engine comparison — experiment B"));
+    s.append(el("div", "desc", "Fetch a ranked SERP for each of this run's search queries, then color each rank/query cell: " +
       "<b style='color:#2e9e6b'>green</b> if that URL was cited, <b style='color:#d2603a'>red</b> if it was in the consideration set (consulted, not cited), blank otherwise. " +
-      "Reveals the retrieval depth/cutoff. Spends SerpAPI credits."));
+      "<b>Bing (SerpAPI)</b> is a scraped, navigational SERP; <b>Exa</b> is neural/relevance-ranked and tends to overlap more with what an LLM retriever surfaces. Spends API credits."));
     if (!(d.search_queries || []).length) {
       s.append(el("div", "desc", "No search queries for this run (web search off or none ran)."));
     } else {
-      const btn = el("button", null, "Compare to Bing");
+      const controls = el("div");
+      controls.style.cssText = "display:flex; gap:8px; align-items:center; flex-wrap:wrap;";
+      const sel = el("select", null, `<option value="exa">Exa (neural)</option><option value="bing">Bing (SerpAPI)</option>`);
+      const btn = el("button", null, "Compare");
       const cont = el("div");
-      btn.onclick = () => { btn.disabled = true; compareToBing(d, cont).finally(() => { btn.disabled = false; }); };
-      s.append(btn);
+      const run = () => {
+        btn.disabled = sel.disabled = true;
+        compareToBing(d, cont, sel.value).finally(() => { btn.disabled = sel.disabled = false; });
+      };
+      btn.onclick = run;
+      controls.append(el("span", "desc", "Engine:"), sel, btn);
+      s.append(controls);
       s.append(cont);
-      // Single run: auto-run, since the user opted in up front. Batch: leave it
-      // to the button per run, to avoid N× SerpAPI spend without a deliberate click.
-      if (batchN === 1) { btn.disabled = true; compareToBing(d, cont).finally(() => { btn.disabled = false; }); }
+      // Single run: auto-run with the default engine, since the user opted in up
+      // front. Batch: leave it to the button per run, to avoid N× API spend.
+      if (batchN === 1) run();
     }
     root.append(s);
   }
