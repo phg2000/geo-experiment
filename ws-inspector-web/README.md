@@ -113,7 +113,12 @@ geo-matched to the run's `user_location` — and draws a matrix:
 How far down the green/red cells reach is the retrieval **depth/cutoff**, visible
 per query. URLs are normalized for matching. Consulted sources that Bing didn't
 rank in the top-30 (re-ranking / tenant mismatch / query variants) have no cell
-and are counted + listed separately. Results are cached per query in the browser
+and are counted + listed separately. Matching is done on a loose **host+path**
+key (protocol, leading `www.`, query params and fragment dropped) so that
+`www`/`http`-vs-`https`/tracking-param differences don't hide genuine matches.
+The section also dumps the **raw Bing results per query** and the **full
+consulted set**, so you can eyeball any matches the keying still misses. Results
+are cached per query in the browser
 session; the SerpAPI call honors `APP_PASSWORD` (cost gate). Caveat: OpenAI
 re-ranks on top of its backend and a SerpAPI scrape ≠ OpenAI's exact Bing view,
 so rank-matching is approximate — clustering near the top is suggestive, not
