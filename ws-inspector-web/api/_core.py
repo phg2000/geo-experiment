@@ -51,11 +51,17 @@ for that entry rather than approximating.
 - If you genuinely had no sources in context, write "(none)" under the title."""
 
 
-def build_input(user_query: str):
-    return [
-        {"role": "system", "content": SOURCES_INSTRUCTION},
-        {"role": "user", "content": user_query},
-    ]
+def build_input(user_query: str, instrumented: bool = True):
+    """Instrumented (default): prepend the SOURCES-dump instruction so the model
+    appends its self-reported consideration set. Bare: send ONLY the user query —
+    the closest analogue to what the chat interface sends — so our instruction
+    doesn't perturb the model's search/answer behavior.
+    """
+    msgs = []
+    if instrumented:
+        msgs.append({"role": "system", "content": SOURCES_INSTRUCTION})
+    msgs.append({"role": "user", "content": user_query})
+    return msgs
 
 
 # =============================================================================
@@ -63,7 +69,7 @@ def build_input(user_query: str):
 # =============================================================================
 
 
-def _call(client, user_query: str):
+def _call(client, user_query: str, instrumented: bool = True):
     from openai import (
         APIConnectionError,
         APITimeoutError,
@@ -78,7 +84,7 @@ def _call(client, user_query: str):
             return client.responses.create(
                 model=MODEL,
                 tools=[WEB_SEARCH_TOOL],
-                input=build_input(user_query),
+                input=build_input(user_query, instrumented),
                 include=INCLUDE_FIELDS,
             )
         except transient as err:
@@ -363,23 +369,37 @@ def extract_usage(raw: dict) -> dict:
 # =============================================================================
 
 
-def build_result(raw: dict, query: str, include_raw: bool = True) -> dict:
+def build_result(raw: dict, query: str, include_raw: bool = True,
+                 instrumented: bool = True) -> dict:
     """Parse a (completed) response dict into the structured result.
 
     Shared by the synchronous path and the background poll path — the parsing
-    is identical; only how/when we obtain `raw` differs.
+    is identical; only how/when we obtain `raw` differs. When `instrumented` is
+    False (bare query), there is no SOURCES dump to parse, so the self-report
+    tier is intentionally empty (not flagged as malformed).
     """
     output = raw.get("output") or []
     message = find_message_item(output)
     full_text, annotations = extract_message_text_and_annotations(message)
-    final_text, sources_block = split_answer_and_sources(full_text)
     citations = extract_citations(annotations)
     api_sources = extract_api_sources(output)
-    self_reported, sr_flags = parse_self_reported_sources(sources_block)
+
+    if instrumented:
+        final_text, sources_block = split_answer_and_sources(full_text)
+        self_reported, sr_flags = parse_self_reported_sources(sources_block)
+    else:
+        final_text = (full_text or "").strip()
+        self_reported, sr_flags = [], {
+            "instrumented": False,
+            "parse_method": "disabled",
+            "partial_or_malformed": False,
+            "notes": ["Sources-dump instruction disabled for this run (bare query)."],
+        }
 
     result = {
         "model": raw.get("model") or MODEL,
         "query": query,
+        "instrumented": instrumented,
         "search_queries": extract_search_queries(output),
         "final_text": final_text,
         "citations": citations,
@@ -397,7 +417,7 @@ def build_result(raw: dict, query: str, include_raw: bool = True) -> dict:
     return result
 
 
-def run_inspection(query: str, include_raw: bool = True) -> dict:
+def run_inspection(query: str, include_raw: bool = True, instrumented: bool = True) -> dict:
     """Synchronous path: run one inspection start-to-finish (blocks until done).
 
     Used by the CLI-style caller. The web app uses the background start/poll
@@ -406,8 +426,8 @@ def run_inspection(query: str, include_raw: bool = True) -> dict:
     from openai import OpenAI
 
     client = OpenAI()
-    response = _call(client, query)
-    return build_result(response_to_dict(response), query, include_raw)
+    response = _call(client, query, instrumented)
+    return build_result(response_to_dict(response), query, include_raw, instrumented)
 
 
 # -- Background mode (start + poll) --------------------------------------------
@@ -421,7 +441,7 @@ _OK_STATES = {"completed"}
 _PENDING_STATES = {"queued", "in_progress"}
 
 
-def start_inspection(query: str) -> dict:
+def start_inspection(query: str, instrumented: bool = True) -> dict:
     """Kick off a background run; return {id, status} immediately."""
     from openai import (
         OpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError,
@@ -435,7 +455,7 @@ def start_inspection(query: str) -> dict:
             resp = client.responses.create(
                 model=MODEL,
                 tools=[WEB_SEARCH_TOOL],
-                input=build_input(query),
+                input=build_input(query, instrumented),
                 include=INCLUDE_FIELDS,
                 background=True,
             )
@@ -449,7 +469,7 @@ def start_inspection(query: str) -> dict:
     raise RuntimeError(f"Failed to start background run after {MAX_RETRIES} attempts: {last_err}")
 
 
-def poll_inspection(response_id: str, query: str) -> dict:
+def poll_inspection(response_id: str, query: str, instrumented: bool = True) -> dict:
     """Check a background run. While pending, return {status}. When done, return
     {status: "completed", result: {...}}. On terminal failure, {status, error}."""
     from openai import OpenAI
@@ -462,7 +482,7 @@ def poll_inspection(response_id: str, query: str) -> dict:
     status = raw.get("status") or "in_progress"
 
     if status in _OK_STATES:
-        return {"status": "completed", "result": build_result(raw, query)}
+        return {"status": "completed", "result": build_result(raw, query, instrumented=instrumented)}
     if status in _PENDING_STATES:
         return {"status": status}
 

@@ -81,6 +81,10 @@
   .runtable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
   .runtable th, .runtable td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
   .runtable th { color: var(--muted); font-weight: 600; }
+  .opts { margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .opts label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+  .opts input { margin-top: 3px; }
+  .opts b { color: var(--text); }
 </style>
 </head>
 <body>
@@ -99,6 +103,12 @@
     </div>
     <button type="submit" id="go">Inspect</button>
   </form>
+  <div class="opts">
+    <label><input type="checkbox" id="instrument" checked />
+      Append the “list every source” instruction (instrumentation). <b>Uncheck</b> to send the
+      <b>bare query</b> — closest to what the chat interface sends. Bare mode keeps citations and the
+      runtime consideration set, but the self-reported tier will be empty.</label>
+  </div>
   <p class="note">Heads up: runs execute in OpenAI background mode (a few minutes each) and run
     in parallel, so N runs take about as long as one. Keep this tab open while it polls.
     Each run is a billable OpenAI call.</p>
@@ -116,6 +126,7 @@ let renderedRuns = new Set();
 let runSlots = {};             // index -> {details, body, failed}
 let batchQuery = "";
 let batchN = 1;
+let batchInstrument = true;
 let analysisEl = null, runsEl = null;
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 9 * 60 * 1000; // OpenAI retains background results ~10 min
@@ -148,11 +159,12 @@ $("form").addEventListener("submit", async (e) => {
   let n = parseInt($("runs").value, 10);
   if (!Number.isFinite(n)) n = 1;
   n = Math.max(1, Math.min(MAX_RUNS, n));
+  const instrument = $("instrument") ? $("instrument").checked : true;
 
   stopPolling();
   $("go").disabled = true;
   $("results").innerHTML = "";
-  jobs = []; renderedRuns = new Set(); runSlots = {}; batchQuery = query; batchN = n;
+  jobs = []; renderedRuns = new Set(); runSlots = {}; batchQuery = query; batchN = n; batchInstrument = instrument;
 
   // Skeleton: analysis area (filled at the end, n>1 only) + per-run area.
   analysisEl = el("div", "analysis"); analysisEl.style.display = "none";
@@ -174,7 +186,7 @@ $("form").addEventListener("submit", async (e) => {
     for (let i = 1; i <= n; i++) {
       const res = await fetch("/api/inspect", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, password }),
+        body: JSON.stringify({ query, password, instrument }),
       });
       const data = await readJson(res);
       if (res.status === 401) { $("pwRow").style.display = "flex"; throw new Error("Password required — enter it and try again."); }
@@ -203,7 +215,8 @@ async function pollAll() {
   const pending = jobs.filter((j) => j.status === "queued" || j.status === "in_progress");
   await Promise.all(pending.map(async (j) => {
     try {
-      const url = `/api/inspect?id=${encodeURIComponent(j.id)}&query=${encodeURIComponent(batchQuery)}`;
+      const url = `/api/inspect?id=${encodeURIComponent(j.id)}&query=${encodeURIComponent(batchQuery)}` +
+        `&instrument=${batchInstrument ? "1" : "0"}`;
       const res = await fetch(url);
       const data = await readJson(res);
       if (!res.ok) { j.status = "failed"; j.error = data.error || `poll failed (${res.status})`; }
@@ -363,7 +376,7 @@ function renderAnalysis(results) {
   const dl = el("div", "downloads");
   const b = el("button", null, "⬇ Download all runs (.json)");
   b.onclick = () => download(`${stamp()}_batch.json`,
-    JSON.stringify({ query: batchQuery, model: results[0]?.model, runs: results }, null, 2), "application/json");
+    JSON.stringify({ query: batchQuery, model: results[0]?.model, instrumented: batchInstrument, runs: results }, null, 2), "application/json");
   dl.append(b);
   analysisEl.append(dl);
 }
@@ -428,6 +441,9 @@ function render(d, root) {
   s = el("section");
   s.append(el("h2", null, `Self-reported sources <span class="badge b-unverified">Unverified</span>`));
   s.append(el("div", "desc", "Parsed from a block the <em>model</em> appended. May omit, paraphrase, or confabulate. Its unique value is the verbatim excerpt text the API doesn't return."));
+  if (d.instrumented === false) {
+    s.append(el("div", "desc", "⚙ <b>Instrumentation off (bare query)</b> — no source-dump instruction was sent, so this tier is intentionally empty. Citations + consideration set above are unaffected."));
+  }
   s.append(el("div", null, linkList(d.self_reported_sources, x => {
     const u = x.url || x.url_unrecoverable_note || "(no url)";
     const urlPart = x.url ? urlLine(x.url) : escapeHtml(u);

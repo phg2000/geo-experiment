@@ -69,8 +69,9 @@ class handler(BaseHTTPRequestHandler):
         if _IMPORT_ERROR is not None:
             return self._send(500, {"error": "Function failed to load.", "detail": _IMPORT_ERROR})
         query = (params.get("query") or [""])[0]
+        instrument = (params.get("instrument") or ["1"])[0] not in ("0", "false", "False")
         try:
-            return self._send(200, poll_inspection(run_id, query))
+            return self._send(200, poll_inspection(run_id, query, instrumented=instrument))
         except Exception as e:  # invalid id, expired, network, etc.
             return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
@@ -95,10 +96,12 @@ class handler(BaseHTTPRequestHandler):
         if not os.environ.get("OPENAI_API_KEY"):
             return self._send(500, {"error": "Server is missing OPENAI_API_KEY env var."})
 
+        instrument = bool(data.get("instrument", True))
         try:
-            started = start_inspection(query)  # {id, status}
+            started = start_inspection(query, instrumented=instrument)  # {id, status}
         except Exception as e:
             return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
         started["_auth_required"] = bool(required)
+        started["_instrumented"] = instrument
         return self._send(200, started)

@@ -42,15 +42,15 @@ def slug(s: str, n: int = 40) -> str:
     return s[:n] or "query"
 
 
-def run_one(query: str):
+def run_one(query: str, instrumented: bool = True):
     """Start a background run and poll until it completes. Returns (id, result)."""
-    started = _core.start_inspection(query)
+    started = _core.start_inspection(query, instrumented=instrumented)
     rid = started.get("id")
     if not rid:
         raise RuntimeError(f"No run id returned: {started}")
     t0 = time.time()
     while True:
-        out = _core.poll_inspection(rid, query)
+        out = _core.poll_inspection(rid, query, instrumented=instrumented)
         status = out.get("status")
         if status == "completed":
             return rid, out["result"]
@@ -68,7 +68,10 @@ def main():
     ap.add_argument("--interval", type=float, default=0.0,
                     help="seconds to wait between runs (default 0; keep small to limit index drift)")
     ap.add_argument("--outdir", default=None, help="output dir (default experiments/runs/<ts>_<slug>)")
+    ap.add_argument("--bare", action="store_true",
+                    help="send the bare query (no source-dump instruction), like the chat interface")
     args = ap.parse_args()
+    instrumented = not args.bare
 
     if not os.environ.get("OPENAI_API_KEY"):
         sys.exit("ERROR: OPENAI_API_KEY is not set.")
@@ -80,16 +83,17 @@ def main():
 
     meta = {
         "query": args.query, "model": _core.MODEL, "requested_runs": args.runs,
-        "started_at": ts, "interval_s": args.interval, "runs": [],
+        "instrumented": instrumented, "started_at": ts, "interval_s": args.interval, "runs": [],
     }
-    print(f"Batch -> {base}   ({args.runs} runs of: {args.query!r})")
+    mode = "instrumented" if instrumented else "BARE (no source-dump instruction)"
+    print(f"Batch -> {base}   ({args.runs} runs, {mode}) of: {args.query!r}")
 
     for i in range(1, args.runs + 1):
         print(f"[{i}/{args.runs}] starting…", flush=True)
         rec = {"index": i}
         try:
             t0 = time.time()
-            rid, result = run_one(args.query)
+            rid, result = run_one(args.query, instrumented=instrumented)
             elapsed = round(time.time() - t0, 1)
             (base / f"{i:02d}.json").write_text(
                 json.dumps(result, indent=2, ensure_ascii=False, default=str))
