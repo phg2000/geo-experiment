@@ -62,6 +62,13 @@ memory, personalization, account/location context, and possibly a different
 model build / tool config that the API doesn't expose. This isolates the effect
 of the *system prompt*, not the entire gap.
 
+### Web search toggle
+
+The **Web search** checkbox enables/disables the `web_search` tool. With it off,
+the model answers from its training data only — no searches, sources, or
+citations — and the `include`/`user_location` are dropped (they reference the
+search call). Useful as a parametric-only baseline. Batch CLI: `--no-web-search`.
+
 ### Location
 
 The **Location** field geo-targets the run. The selected city is sent two ways,

@@ -108,10 +108,12 @@ def chatgpt_system_prompt(location_label: str = "") -> str:
     )
 
 
-def build_tools(location=None):
+def build_tools(location=None, web_search=True):
     """Web-search tool, optionally geo-targeted via user_location. The location
     actually steers search results (regional availability etc.), independent of
-    the prompt mode."""
+    the prompt mode. Returns [] when web_search is disabled."""
+    if not web_search:
+        return []
     tool = {"type": "web_search"}
     if location:
         ul = {"type": "approximate"}
@@ -147,7 +149,7 @@ def build_input(user_query: str, mode: str = MODE_INSTRUMENTED, location_label: 
 # =============================================================================
 
 
-def _call(client, user_query: str, mode: str = MODE_INSTRUMENTED, location=None):
+def _call(client, user_query: str, mode: str = MODE_INSTRUMENTED, location=None, web_search=True):
     from openai import (
         APIConnectionError,
         APITimeoutError,
@@ -159,12 +161,14 @@ def _call(client, user_query: str, mode: str = MODE_INSTRUMENTED, location=None)
     last_err = None
     for attempt in range(MAX_RETRIES):
         try:
-            return client.responses.create(
-                model=MODEL,
-                tools=build_tools(location),
-                input=build_input(user_query, mode, _loc_label(location)),
-                include=INCLUDE_FIELDS,
-            )
+            kwargs = {
+                "model": MODEL,
+                "tools": build_tools(location, web_search),
+                "input": build_input(user_query, mode, _loc_label(location)),
+            }
+            if web_search:  # include references web_search_call; omit when off
+                kwargs["include"] = INCLUDE_FIELDS
+            return client.responses.create(**kwargs)
         except transient as err:
             last_err = err
             if attempt == MAX_RETRIES - 1:
@@ -457,7 +461,7 @@ def extract_usage(raw: dict) -> dict:
 
 
 def build_result(raw: dict, query: str, include_raw: bool = True,
-                 mode: str = MODE_INSTRUMENTED) -> dict:
+                 mode: str = MODE_INSTRUMENTED, web_search: bool = True) -> dict:
     """Parse a (completed) response dict into the structured result.
 
     Shared by the synchronous path and the background poll path — the parsing
@@ -488,6 +492,7 @@ def build_result(raw: dict, query: str, include_raw: bool = True,
         "model": raw.get("model") or MODEL,
         "query": query,
         "mode": mode,
+        "web_search": web_search,
         "instrumented": mode == MODE_INSTRUMENTED,
         "user_location": extract_user_location(raw),
         "search_queries": extract_search_queries(output),
@@ -508,7 +513,7 @@ def build_result(raw: dict, query: str, include_raw: bool = True,
 
 
 def run_inspection(query: str, include_raw: bool = True, mode: str = MODE_INSTRUMENTED,
-                   location=None) -> dict:
+                   location=None, web_search: bool = True) -> dict:
     """Synchronous path: run one inspection start-to-finish (blocks until done).
 
     Used by the CLI-style caller. The web app uses the background start/poll
@@ -517,8 +522,8 @@ def run_inspection(query: str, include_raw: bool = True, mode: str = MODE_INSTRU
     from openai import OpenAI
 
     client = OpenAI()
-    response = _call(client, query, mode, location)
-    return build_result(response_to_dict(response), query, include_raw, mode)
+    response = _call(client, query, mode, location, web_search)
+    return build_result(response_to_dict(response), query, include_raw, mode, web_search)
 
 
 # -- Background mode (start + poll) --------------------------------------------
@@ -532,7 +537,8 @@ _OK_STATES = {"completed"}
 _PENDING_STATES = {"queued", "in_progress"}
 
 
-def start_inspection(query: str, mode: str = MODE_INSTRUMENTED, location=None) -> dict:
+def start_inspection(query: str, mode: str = MODE_INSTRUMENTED, location=None,
+                     web_search: bool = True) -> dict:
     """Kick off a background run; return {id, status} immediately."""
     from openai import (
         OpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError,
@@ -544,11 +550,12 @@ def start_inspection(query: str, mode: str = MODE_INSTRUMENTED, location=None) -
     # what went out (system prompt, tools/user_location, include, etc.).
     payload = {
         "model": MODEL,
-        "tools": build_tools(location),
+        "tools": build_tools(location, web_search),
         "input": build_input(query, mode, _loc_label(location)),
-        "include": INCLUDE_FIELDS,
         "background": True,
     }
+    if web_search:  # include references web_search_call; omit when off
+        payload["include"] = INCLUDE_FIELDS
     last_err = None
     for attempt in range(MAX_RETRIES):
         try:
@@ -563,7 +570,8 @@ def start_inspection(query: str, mode: str = MODE_INSTRUMENTED, location=None) -
     raise RuntimeError(f"Failed to start background run after {MAX_RETRIES} attempts: {last_err}")
 
 
-def poll_inspection(response_id: str, query: str, mode: str = MODE_INSTRUMENTED) -> dict:
+def poll_inspection(response_id: str, query: str, mode: str = MODE_INSTRUMENTED,
+                    web_search: bool = True) -> dict:
     """Check a background run. While pending, return {status}. When done, return
     {status: "completed", result: {...}}. On terminal failure, {status, error}."""
     from openai import OpenAI
@@ -571,12 +579,17 @@ def poll_inspection(response_id: str, query: str, mode: str = MODE_INSTRUMENTED)
     client = OpenAI()
     # `include` is a per-request serialization directive: with background mode
     # the sources are NOT in the creation response and must be re-requested here
-    # on retrieve, or action.sources comes back null. (openai-node issue #1676)
-    raw = response_to_dict(client.responses.retrieve(response_id, include=INCLUDE_FIELDS))
+    # on retrieve, or action.sources comes back null. (openai-node issue #1676).
+    # With web search off there is no web_search_call, so don't request it.
+    if web_search:
+        raw = response_to_dict(client.responses.retrieve(response_id, include=INCLUDE_FIELDS))
+    else:
+        raw = response_to_dict(client.responses.retrieve(response_id))
     status = raw.get("status") or "in_progress"
 
     if status in _OK_STATES:
-        return {"status": "completed", "result": build_result(raw, query, mode=mode)}
+        return {"status": "completed",
+                "result": build_result(raw, query, mode=mode, web_search=web_search)}
     if status in _PENDING_STATES:
         return {"status": status}
 

@@ -89,6 +89,7 @@
   #mode { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--panel); color: var(--text); font-size: 14px; }
   .opts label { display: inline-flex; gap: 8px; align-items: center; cursor: default; }
+  .wschk { margin-left: 16px; cursor: pointer; }
   .modehelp { display: block; margin-top: 6px; color: var(--muted); }
   .locrow { margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .locrow > label { display: inline-flex; align-items: center; gap: 8px; }
@@ -154,6 +155,7 @@
         <option value="bare">Bare (query only)</option>
       </select>
     </label>
+    <label class="wschk"><input type="checkbox" id="websearch" checked /> Web search</label>
     <span id="modeHelp" class="modehelp"></span>
     <div class="locrow">
       <label>Location:
@@ -185,6 +187,7 @@ let runSlots = {};             // index -> {details, body, failed}
 let batchQuery = "";
 let batchN = 1;
 let batchMode = "instrumented";
+let batchWebSearch = true;
 let analysisEl = null, runsEl = null;
 
 const MODE_HELP = {
@@ -279,12 +282,14 @@ $("form").addEventListener("submit", async (e) => {
   if (!Number.isFinite(n)) n = 1;
   n = Math.max(1, Math.min(MAX_RUNS, n));
   const mode = $("mode") ? $("mode").value : "instrumented";
+  const webSearch = $("websearch") ? $("websearch").checked : true;
   const location = resolveLocation();
 
   stopPolling();
   $("go").disabled = true;
   $("results").innerHTML = "";
   jobs = []; renderedRuns = new Set(); runSlots = {}; batchQuery = query; batchN = n; batchMode = mode;
+  batchWebSearch = webSearch;
 
   // Skeleton: analysis area (filled at the end, n>1 only) + per-run area.
   analysisEl = el("div", "analysis"); analysisEl.style.display = "none";
@@ -306,7 +311,7 @@ $("form").addEventListener("submit", async (e) => {
     for (let i = 1; i <= n; i++) {
       const res = await fetch("/api/inspect", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, password, mode, location }),
+        body: JSON.stringify({ query, password, mode, location, web_search: webSearch }),
       });
       const data = await readJson(res);
       if (res.status === 401) { $("pwRow").style.display = "flex"; throw new Error("Password required — enter it and try again."); }
@@ -336,7 +341,7 @@ async function pollAll() {
   await Promise.all(pending.map(async (j) => {
     try {
       const url = `/api/inspect?id=${encodeURIComponent(j.id)}&query=${encodeURIComponent(batchQuery)}` +
-        `&mode=${encodeURIComponent(batchMode)}`;
+        `&mode=${encodeURIComponent(batchMode)}&web_search=${batchWebSearch ? "1" : "0"}`;
       const res = await fetch(url);
       const data = await readJson(res);
       if (!res.ok) { j.status = "failed"; j.error = data.error || `poll failed (${res.status})`; }
@@ -557,6 +562,7 @@ function render(d, root) {
   s.append(el("h2", null, "Query"));
   s.append(el("div", "q", escapeHtml(d.query)));
   s.append(el("div", "desc", `mode: <b>${escapeHtml(d.mode || "?")}</b>` +
+    ` · web search: <b>${d.web_search === false ? "off" : "on"}</b>` +
     (d.user_location ? ` · location: <b>${escapeHtml(formatLoc(d.user_location))}</b>` : " · location: (none)")));
   root.append(s);
 
@@ -596,6 +602,9 @@ function render(d, root) {
   s = el("section");
   s.append(el("h2", null, `Consideration set <span class="badge b-runtime">Runtime-reported</span>`));
   s.append(el("div", "desc", "URLs the web_search tool actually surfaced (cited or not), from <code>action.sources</code>. Comes from the runtime, not the model — can't be confabulated. (URLs/titles only, not passage text.)"));
+  if (d.web_search === false) {
+    s.append(el("div", "desc", "🚫 <b>Web search disabled for this run</b> — the model answered from its training data only, so there are no searches, sources, or citations."));
+  }
   s.append(el("div", null, linkList(d.api_sources, x =>
     `<li>${urlLine(x.url)}<br><span class="title">${escapeHtml(x.title || "")}</span></li>`)));
   root.append(s);

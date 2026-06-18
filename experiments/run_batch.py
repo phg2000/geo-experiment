@@ -62,15 +62,15 @@ def geocode_location(name: str):
     }
 
 
-def run_one(query: str, mode: str = "instrumented", location=None):
+def run_one(query: str, mode: str = "instrumented", location=None, web_search: bool = True):
     """Start a background run and poll until it completes. Returns (id, result)."""
-    started = _core.start_inspection(query, mode=mode, location=location)
+    started = _core.start_inspection(query, mode=mode, location=location, web_search=web_search)
     rid = started.get("id")
     if not rid:
         raise RuntimeError(f"No run id returned: {started}")
     t0 = time.time()
     while True:
-        out = _core.poll_inspection(rid, query, mode=mode)
+        out = _core.poll_inspection(rid, query, mode=mode, web_search=web_search)
         status = out.get("status")
         if status == "completed":
             return rid, out["result"]
@@ -94,8 +94,11 @@ def main():
     ap.add_argument("--bare", action="store_true", help="alias for --mode bare")
     ap.add_argument("--geocode", default=None, metavar="CITY",
                     help="geo-target the web search to this place (resolved via Open-Meteo)")
+    ap.add_argument("--no-web-search", action="store_true",
+                    help="disable the web_search tool (answer from training data only)")
     args = ap.parse_args()
     mode = "bare" if args.bare else args.mode
+    web_search = not args.no_web_search
 
     location = None
     if args.geocode:
@@ -115,17 +118,19 @@ def main():
 
     meta = {
         "query": args.query, "model": _core.MODEL, "requested_runs": args.runs,
-        "mode": mode, "location": location, "started_at": ts, "interval_s": args.interval, "runs": [],
+        "mode": mode, "web_search": web_search, "location": location,
+        "started_at": ts, "interval_s": args.interval, "runs": [],
     }
     loc_str = f", location={location['label']}" if location else ""
-    print(f"Batch -> {base}   ({args.runs} runs, mode={mode}{loc_str}) of: {args.query!r}")
+    ws_str = "" if web_search else ", web_search=OFF"
+    print(f"Batch -> {base}   ({args.runs} runs, mode={mode}{ws_str}{loc_str}) of: {args.query!r}")
 
     for i in range(1, args.runs + 1):
         print(f"[{i}/{args.runs}] starting…", flush=True)
         rec = {"index": i}
         try:
             t0 = time.time()
-            rid, result = run_one(args.query, mode=mode, location=location)
+            rid, result = run_one(args.query, mode=mode, location=location, web_search=web_search)
             elapsed = round(time.time() - t0, 1)
             (base / f"{i:02d}.json").write_text(
                 json.dumps(result, indent=2, ensure_ascii=False, default=str))

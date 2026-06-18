@@ -72,8 +72,9 @@ class handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": "Function failed to load.", "detail": _IMPORT_ERROR})
         query = (params.get("query") or [""])[0]
         mode = normalize_mode((params.get("mode") or [MODE_INSTRUMENTED])[0])
+        web_search = (params.get("web_search") or ["1"])[0] not in ("0", "false", "False")
         try:
-            return self._send(200, poll_inspection(run_id, query, mode=mode))
+            return self._send(200, poll_inspection(run_id, query, mode=mode, web_search=web_search))
         except Exception as e:  # invalid id, expired, network, etc.
             return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
@@ -113,11 +114,14 @@ class handler(BaseHTTPRequestHandler):
                         if isinstance(loc_in.get(k), str) and loc_in.get(k).strip()}
             location = location or None
 
+        web_search = bool(data.get("web_search", True))
+
         try:
-            started = start_inspection(query, mode=mode, location=location)  # {id, status}
+            started = start_inspection(query, mode=mode, location=location, web_search=web_search)
         except Exception as e:
             return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
         started["_auth_required"] = bool(required)
         started["_mode"] = mode
+        started["_web_search"] = web_search
         return self._send(200, started)
