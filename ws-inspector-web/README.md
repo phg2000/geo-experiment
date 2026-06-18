@@ -38,6 +38,18 @@ identical to a synchronous run. Nothing is persisted server-side (serverless has
 no writable disk); OpenAI retains the background result for ~10 minutes, and the
 `.json` / `.md` downloads are generated client-side.
 
+### Batch / variability mode
+
+Set **Runs > 1** to repeat the same query N times. The browser starts N
+background jobs in parallel (staggered slightly to avoid rate-limit bursts) and
+polls them all, so N runs take about as long as one. Every run's full result is
+shown (collapsible), and once N > 1 a **cross-run analysis** appears at the top:
+per-run set sizes, union vs intersection, core (every run) vs tail (one run),
+and mean pairwise Jaccard for the search queries, the runtime consideration set,
+and the citations — the in-browser equivalent of `experiments/analyze_variability.py`.
+"Download all runs (.json)" saves the batch. (For large N or persistent storage,
+use the `experiments/` CLI instead.)
+
 ## Deploy (fastest path)
 
 1. Push this repo to GitHub (already done if you're reading this on the branch).

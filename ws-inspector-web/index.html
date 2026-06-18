@@ -63,25 +63,45 @@
   details { margin-top: 16px; }
   summary { cursor: pointer; color: var(--muted); }
   pre { overflow: auto; background: var(--panel2); padding: 12px; border-radius: 8px; font-size: 12px; }
+  /* batch mode */
+  #runs { width: 74px; padding: 12px 8px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); font-size: 15px; text-align: center; }
+  .run-block { border: 1px solid var(--border); border-radius: 12px; margin-top: 14px; background: var(--panel); }
+  .run-block > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; list-style: none; }
+  .run-block > summary::-webkit-details-marker { display: none; }
+  .run-block[open] > summary { border-bottom: 1px solid var(--border); }
+  .run-body { padding: 2px 16px 12px; }
+  .analysis { background: var(--panel); border: 1px solid var(--accent); border-radius: 12px;
+    padding: 16px 18px; margin-top: 16px; }
+  .analysis > h2 { font-size: 16px; margin: 0 0 4px; }
+  .chan { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-top: 12px; }
+  .chan h3 { margin: 0 0 8px; font-size: 14px; }
+  .statline { color: var(--muted); font-size: 13px; margin: 3px 0; }
+  .statline b { color: var(--text); }
+  .runtable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .runtable th, .runtable td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .runtable th { color: var(--muted); font-weight: 600; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Web-Search Raw Run Inspector</h1>
-  <p class="sub">One query → the raw anatomy of a single ChatGPT web-search run:
+  <p class="sub">One query → the raw anatomy of a ChatGPT web-search run:
     queries, answer, citations (ground truth), the runtime consideration set, and
-    the model's self-report (unverified).</p>
+    the model's self-report (unverified). Set <b>Runs &gt; 1</b> to repeat the same
+    query and see how much the searches and sources vary.</p>
 
   <form id="form">
     <input type="text" id="query" placeholder="e.g. what's the best supplement for building muscle?" autocomplete="off" />
-    <div id="pwRow" style="flex-basis:100%; display:flex; gap:10px;">
+    <input type="number" id="runs" min="1" max="25" value="1" title="number of runs" />
+    <div id="pwRow" style="flex-basis:100%; display:none; gap:10px;">
       <input type="password" id="password" placeholder="password" autocomplete="off" style="flex:1;" />
     </div>
     <button type="submit" id="go">Inspect</button>
   </form>
-  <p class="note">Heads up: the run executes in OpenAI background mode and can take a few minutes
-    (the model searches, reads, and writes a sources dump). Keep this tab open while it polls.
-    It calls a billable OpenAI model.</p>
+  <p class="note">Heads up: runs execute in OpenAI background mode (a few minutes each) and run
+    in parallel, so N runs take about as long as one. Keep this tab open while it polls.
+    Each run is a billable OpenAI call.</p>
 
   <div id="status" class="status"></div>
   <div id="results"></div>
@@ -89,11 +109,17 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let lastResult = null;
 let pollTimer = null;
 let startTime = 0;
+let jobs = [];                 // [{index, id, status, result, error}]
+let renderedRuns = new Set();
+let runSlots = {};             // index -> {details, body, failed}
+let batchQuery = "";
+let batchN = 1;
+let analysisEl = null, runsEl = null;
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 9 * 60 * 1000; // OpenAI retains background results ~10 min
+const MAX_RUNS = 25;
 
 // Read a response as text first, then parse defensively: a crashed/timed-out
 // function returns a non-JSON page (e.g. "A server error has occurred"), which
@@ -112,86 +138,234 @@ function setStatus(html) { $("status").innerHTML = html; }
 function showError(msg) { $("results").innerHTML = `<div class="err">${escapeHtml(msg)}</div>`; }
 function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const query = $("query").value.trim();
   if (!query) return;
   const password = $("password") ? $("password").value : "";
+  let n = parseInt($("runs").value, 10);
+  if (!Number.isFinite(n)) n = 1;
+  n = Math.max(1, Math.min(MAX_RUNS, n));
+
   stopPolling();
   $("go").disabled = true;
   $("results").innerHTML = "";
-  setStatus(`<span class="spinner"></span>Starting run…`);
-  try {
-    // 1) Start the background run; get back a job id immediately.
-    const res = await fetch("/api/inspect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, password }),
-    });
-    const data = await readJson(res);
-    if (res.status === 401) {
-      $("pwRow").style.display = "flex";
-      throw new Error("This instance is password-protected. Enter the password and try again.");
+  jobs = []; renderedRuns = new Set(); runSlots = {}; batchQuery = query; batchN = n;
+
+  // Skeleton: analysis area (filled at the end, n>1 only) + per-run area.
+  analysisEl = el("div", "analysis"); analysisEl.style.display = "none";
+  runsEl = el("div");
+  $("results").append(analysisEl, runsEl);
+  if (n > 1) {
+    for (let i = 1; i <= n; i++) {
+      const det = el("details", "run-block");
+      det.append(el("summary", null, `Run ${i} — pending…`));
+      const body = el("div", "run-body"); body.append(el("div", "note", "waiting…"));
+      det.append(body); runsEl.append(det);
+      runSlots[i] = { details: det, body, failed: false };
     }
-    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-    if (data._auth_required) $("pwRow").style.display = "flex";
-    if (!data.id) throw new Error("Server did not return a job id.");
-    // 2) Poll until the run reaches a terminal state.
-    startPolling(data.id, query);
+  }
+
+  setStatus(`<span class="spinner"></span>Starting ${n} run${n > 1 ? "s" : ""}…`);
+  try {
+    // Start N background jobs, staggered slightly to avoid a rate-limit burst.
+    for (let i = 1; i <= n; i++) {
+      const res = await fetch("/api/inspect", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, password }),
+      });
+      const data = await readJson(res);
+      if (res.status === 401) { $("pwRow").style.display = "flex"; throw new Error("Password required — enter it and try again."); }
+      if (data._auth_required) $("pwRow").style.display = "flex";
+      if (!res.ok || !data.id) {
+        if (res.status >= 500 && /OPENAI_API_KEY/.test(data.error || "")) throw new Error(data.error);
+        jobs.push({ index: i, id: null, status: "failed", error: data.error || `start failed (${res.status})` });
+      } else {
+        jobs.push({ index: i, id: data.id, status: "queued" });
+      }
+      setStatus(`<span class="spinner"></span>Started ${i}/${n}…`);
+      if (i < n) await sleep(300);
+    }
+    if (!jobs.some((j) => j.id)) throw new Error("All runs failed to start. " + (jobs[0]?.error || ""));
+    startTime = Date.now();
+    pollAll();
   } catch (err) {
+    stopPolling();
     setStatus("");
     showError(err.message);
     $("go").disabled = false;
   }
 });
 
-function startPolling(id, query) {
-  startTime = Date.now();
-  const tick = async () => {
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-    setStatus(
-      `<span class="spinner"></span>Running on OpenAI… ${elapsed}s elapsed` +
-      `<div class="note">Job id: <code>${escapeHtml(id)}</code> — keep this tab open. ` +
-      `Web search runs can take a few minutes.</div>`
-    );
-    if (Date.now() - startTime > MAX_POLL_MS) {
-      stopPolling();
-      showError(`Stopped polling after ~9 min. The job id is ${id} — it may still ` +
-                `finish on OpenAI's side, but results are only retained ~10 min.`);
-      $("go").disabled = false;
-      return;
-    }
+async function pollAll() {
+  const pending = jobs.filter((j) => j.status === "queued" || j.status === "in_progress");
+  await Promise.all(pending.map(async (j) => {
     try {
-      const url = `/api/inspect?id=${encodeURIComponent(id)}&query=${encodeURIComponent(query)}`;
+      const url = `/api/inspect?id=${encodeURIComponent(j.id)}&query=${encodeURIComponent(batchQuery)}`;
       const res = await fetch(url);
       const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || `Poll failed (${res.status})`);
+      if (!res.ok) { j.status = "failed"; j.error = data.error || `poll failed (${res.status})`; }
+      else if (data.status === "completed" && data.result) { j.status = "completed"; j.result = data.result; }
+      else if (data.status && data.status !== "queued" && data.status !== "in_progress") { j.status = data.status; j.error = data.error; }
+      else { j.status = data.status; }
+    } catch (err) { j.status = "failed"; j.error = err.message; }
+  }));
 
-      if (data.status === "completed" && data.result) {
-        stopPolling();
-        setStatus("");
-        $("go").disabled = false;
-        lastResult = data.result;
-        render(data.result);
-        return;
+  // Fill newly-finished run slots (completed and failed), preserving run order.
+  for (const j of jobs) {
+    if (j.status === "completed" && !renderedRuns.has(j.index)) { renderRun(j); renderedRuns.add(j.index); }
+    else if (batchN > 1 && j.status !== "completed" && j.status !== "queued" && j.status !== "in_progress") {
+      const slot = runSlots[j.index];
+      if (slot && !slot.failed) {
+        slot.failed = true;
+        slot.details.querySelector("summary").textContent = `Run ${j.index} — failed: ${j.error || j.status}`;
+        slot.body.innerHTML = `<div class="err">${escapeHtml(j.error || j.status)}</div>`;
       }
-      if (data.status && data.status !== "queued" && data.status !== "in_progress") {
-        stopPolling();
-        setStatus("");
-        $("go").disabled = false;
-        showError(`Run ended with status "${data.status}". ${data.error || ""}`);
-        return;
-      }
-      // still queued / in_progress -> schedule next poll
-      pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
-    } catch (err) {
-      stopPolling();
-      setStatus("");
-      $("go").disabled = false;
-      showError(err.message);
     }
-  };
-  tick();
+  }
+
+  const done = jobs.every((j) => j.status !== "queued" && j.status !== "in_progress");
+  const elapsed = Math.round((Date.now() - startTime) / 1000);
+  const okN = jobs.filter((j) => j.status === "completed").length;
+  const failN = jobs.length - okN - jobs.filter((j) => j.status === "queued" || j.status === "in_progress").length;
+
+  if (done) { stopPolling(); finalize(okN, failN, elapsed, false); return; }
+  if (Date.now() - startTime > MAX_POLL_MS) { stopPolling(); finalize(okN, failN, elapsed, true); return; }
+
+  setStatus(`<span class="spinner"></span>Running ${batchN} run${batchN > 1 ? "s" : ""} on OpenAI — ` +
+    `${okN}/${batchN} done${failN ? `, ${failN} failed` : ""} · ${elapsed}s elapsed` +
+    `<div class="note">Runs execute in parallel; keep this tab open.</div>`);
+  pollTimer = setTimeout(pollAll, POLL_INTERVAL_MS);
+}
+
+function finalize(okN, failN, elapsed, timedOut) {
+  $("go").disabled = false;
+  const completed = jobs.filter((j) => j.status === "completed").map((j) => j.result);
+  if (batchN > 1 && completed.length >= 2) renderAnalysis(completed);
+  if (okN === 0) { showError(`All runs failed. ${jobs.find((j) => j.error)?.error || ""}`); return; }
+  if (batchN === 1) { setStatus(""); return; }
+  let msg = `Done — ${okN}/${batchN} succeeded${failN ? `, ${failN} failed` : ""} · ${elapsed}s.`;
+  if (timedOut) msg += " (stopped polling at ~9 min; stragglers may be unfinished)";
+  setStatus(msg);
+}
+
+function renderRun(j) {
+  if (batchN === 1) { render(j.result, runsEl); return; }
+  const r = j.result, slot = runSlots[j.index];
+  const nq = (r.search_queries || []).length, na = (r.api_sources || []).length, nc = (r.citations || []).length;
+  slot.details.querySelector("summary").textContent =
+    `Run ${j.index} — ${nq} queries · ${na} sources · ${nc} citations`;
+  slot.body.innerHTML = "";
+  render(r, slot.body);
+}
+
+// ---- Cross-run analysis (client-side port of analyze_variability.py) --------
+function normQuery(q) { return String(q || "").trim().toLowerCase().replace(/\s+/g, " "); }
+function normalizeUrl(u) {
+  if (!u || typeof u !== "string") return null;
+  try {
+    const x = new URL(u.trim());
+    const drop = (k) => k.toLowerCase().startsWith("utm_") || ["ref", "fbclid", "gclid"].includes(k.toLowerCase());
+    const ps = [...x.searchParams.entries()].filter(([k]) => !drop(k))
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : (a[1] < b[1] ? -1 : 1)));
+    const qs = new URLSearchParams(ps).toString();
+    const path = x.pathname.replace(/\/+$/, "");
+    return `${x.protocol.toLowerCase()}//${x.host.toLowerCase()}${path}${qs ? "?" + qs : ""}`;
+  } catch { return u.trim().toLowerCase().replace(/\/+$/, ""); }
+}
+function urlSets(results, key) {
+  const sets = [], disp = new Map();
+  for (const r of results) {
+    const s = new Set();
+    for (const it of (r[key] || [])) {
+      const u = typeof it === "string" ? it : (it && it.url);
+      const nu = normalizeUrl(u);
+      if (nu) { s.add(nu); if (!disp.has(nu)) disp.set(nu, u); }
+    }
+    sets.push(s);
+  }
+  return { sets, disp };
+}
+function querySets(results) {
+  const sets = [], disp = new Map();
+  for (const r of results) {
+    const s = new Set();
+    for (const q of (r.search_queries || [])) { const nq = normQuery(q); if (nq) { s.add(nq); if (!disp.has(nq)) disp.set(nq, q); } }
+    sets.push(s);
+  }
+  return { sets, disp };
+}
+function meanPairwiseJaccard(sets) {
+  if (sets.length < 2) return null;
+  let tot = 0, cnt = 0;
+  for (let i = 0; i < sets.length; i++) for (let j = i + 1; j < sets.length; j++) {
+    const a = sets[i], b = sets[j], uni = new Set([...a, ...b]);
+    let inter = 0; a.forEach((x) => { if (b.has(x)) inter++; });
+    tot += uni.size ? inter / uni.size : 1; cnt++;
+  }
+  return tot / cnt;
+}
+function summarizeSets(sets) {
+  const n = sets.length, sizes = sets.map((s) => s.size);
+  const union = new Set(); sets.forEach((s) => s.forEach((x) => union.add(x)));
+  let inter = null;
+  for (const s of sets) { if (inter === null) inter = new Set(s); else for (const x of [...inter]) if (!s.has(x)) inter.delete(x); }
+  inter = inter || new Set();
+  const freq = new Map(); sets.forEach((s) => s.forEach((x) => freq.set(x, (freq.get(x) || 0) + 1)));
+  let core = 0, tail = 0; for (const c of freq.values()) { if (c === n) core++; if (c === 1) tail++; }
+  return { n, mean: sizes.reduce((a, b) => a + b, 0) / (n || 1), min: Math.min(...sizes), max: Math.max(...sizes),
+    union: union.size, inter: inter.size, core, tail, jaccard: meanPairwiseJaccard(sets), freq };
+}
+function channelCard(title, sets, disp) {
+  const s = summarizeSets(sets), n = sets.length;
+  const card = el("div", "chan");
+  card.append(el("h3", null, escapeHtml(title)));
+  card.append(el("div", "statline",
+    `set size/run: <b>${s.min}–${s.max}</b> (mean ${s.mean.toFixed(1)}) · union <b>${s.union}</b> · intersection <b>${s.inter}</b>`));
+  card.append(el("div", "statline",
+    `core (every run): <b>${s.core}</b> · tail (one run): <b>${s.tail}</b> · mean pairwise Jaccard: <b>${s.jaccard == null ? "n/a" : s.jaccard.toFixed(3)}</b>`));
+  const hist = {}; for (let k = 1; k <= n; k++) hist[k] = 0;
+  for (const c of s.freq.values()) hist[c] = (hist[c] || 0) + 1;
+  const maxc = Math.max(1, ...Object.values(hist));
+  let h = `<div class="statline">appeared in k/${n} runs:</div>`;
+  for (let k = n; k >= 1; k--) if (hist[k]) {
+    const w = Math.max(6, Math.round(150 * hist[k] / maxc));
+    h += `<div class="statline">${k}/${n}: ${hist[k]} <span style="display:inline-block;height:9px;width:${w}px;background:var(--accent);border-radius:3px;vertical-align:middle"></span></div>`;
+  }
+  card.insertAdjacentHTML("beforeend", h);
+  const top = [...s.freq.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 8);
+  if (top.length) {
+    const items = top.map(([k, c]) => {
+      const d = disp.get(k), isUrl = typeof d === "string" && /^https?:/i.test(d);
+      return `<li><span class="q">${c}/${n}</span> ${isUrl ? urlLine(d) : escapeHtml(d || k)}</li>`;
+    }).join("");
+    card.insertAdjacentHTML("beforeend", `<div class="statline">most consistent:</div><ol>${items}</ol>`);
+  }
+  return card;
+}
+function renderAnalysis(results) {
+  analysisEl.style.display = "";
+  analysisEl.innerHTML = "";
+  analysisEl.append(el("h2", null, `Cross-run analysis · ${results.length} runs`));
+  analysisEl.append(el("div", "desc",
+    "How much the runs differ for the same query. URLs normalized; queries case/space-folded. " +
+    "Jaccard = 1.0 means identical every run, 0 means disjoint."));
+  const tbl = el("table", "runtable");
+  tbl.innerHTML = "<tr><th>run</th><th>queries</th><th>sources</th><th>citations</th></tr>" +
+    results.map((r, i) => `<tr><td>${i + 1}</td><td>${(r.search_queries || []).length}</td><td>${(r.api_sources || []).length}</td><td>${(r.citations || []).length}</td></tr>`).join("");
+  analysisEl.append(tbl);
+  const q = querySets(results), a = urlSets(results, "api_sources"), c = urlSets(results, "citations");
+  analysisEl.append(channelCard("Search queries", q.sets, q.disp));
+  analysisEl.append(channelCard("Runtime consideration set (api_sources)", a.sets, a.disp));
+  analysisEl.append(channelCard("Citations", c.sets, c.disp));
+  const dl = el("div", "downloads");
+  const b = el("button", null, "⬇ Download all runs (.json)");
+  b.onclick = () => download(`${stamp()}_batch.json`,
+    JSON.stringify({ query: batchQuery, model: results[0]?.model, runs: results }, null, 2), "application/json");
+  dl.append(b);
+  analysisEl.append(dl);
 }
 
 function el(tag, cls, html) {
@@ -212,10 +386,8 @@ function urlLine(u) {
   return `<a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a>`;
 }
 
-function render(d) {
-  const root = $("results");
-  root.innerHTML = "";
-
+function render(d, root) {
+  // Renders one run's full result into `root` (a container element).
   // Query
   let s = el("section");
   s.append(el("h2", null, "Query"));
