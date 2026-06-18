@@ -314,7 +314,12 @@ function renderMatrix(d, queries, serps, container) {
   cols.forEach((c) => c.ranks.slice(0, depth).forEach((r) => { if (r.norm) onBing.add(r.norm); }));
   const consultedNotOnBing = [...sources].filter((u) => !onBing.has(u));
 
-  let html = `<div class="legend">` +
+  const notes = [...new Set(serps.map((s) => s && s.note).filter(Boolean))];
+  let html = "";
+  if (notes.length) {
+    html += `<div class="desc" style="color:var(--warn,#d2a03a)">⚠ ${notes.map(escapeHtml).join("<br>")}</div>`;
+  }
+  html += `<div class="legend">` +
     `<span><span class="sw" style="background:#2e9e6b"></span>cited (green)</span>` +
     `<span><span class="sw" style="background:#d2603a"></span>consulted, not cited (red)</span>` +
     `<span><span class="sw" style="background:var(--panel2)"></span>Bing result, model didn't surface it</span>` +

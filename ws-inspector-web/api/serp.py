@@ -25,20 +25,16 @@ SERPAPI_URL = "https://serpapi.com/search.json"
 DEFAULT_COUNT = 30
 
 
-def fetch_bing(query: str, cc: str, location: str, count: int, api_key: str) -> dict:
-    params = {"engine": "bing", "q": query, "api_key": api_key, "count": count}
-    if cc:
-        params["cc"] = cc.lower()
-    if location:
-        params["location"] = location
+def _request(params: dict) -> dict:
+    """One SerpAPI call. Returns {"results"|"error", ...}; raises nothing."""
     url = SERPAPI_URL + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": "ws-inspector/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=25) as r:
-            data = json.load(r)
+            return json.load(r)
     except urllib.error.HTTPError as e:
-        # SerpAPI puts a useful message in the JSON body (e.g. invalid API key);
-        # urllib raises before we can read it, so surface it here.
+        # SerpAPI puts a useful message in the JSON body (invalid key, bad
+        # location, …); urllib raises before we can read it, so surface it here.
         msg = f"HTTP {e.code}"
         try:
             body = json.loads(e.read().decode("utf-8", "replace"))
@@ -48,7 +44,23 @@ def fetch_bing(query: str, cc: str, location: str, count: int, api_key: str) -> 
             pass
         if e.code == 401:
             msg = f"SerpAPI rejected the key (401): {msg}"
-        return {"error": msg, "results": []}
+        return {"error": msg}
+
+
+def fetch_bing(query: str, cc: str, location: str, count: int, api_key: str) -> dict:
+    base = {"engine": "bing", "q": query, "api_key": api_key, "count": count}
+    if cc:
+        base["cc"] = cc.lower()
+
+    # Bing's `location` only accepts canonical names from SerpAPI's Locations API,
+    # so a free-form "City, Region, Country" can be rejected. Try with it, and on
+    # a location-specific error fall back to a country-only (cc) search.
+    note = None
+    data = _request({**base, "location": location} if location else base)
+    if location and isinstance(data, dict) and data.get("error") \
+            and "location" in str(data["error"]).lower():
+        note = f"Bing ignored the location ({location!r}): {data['error']}. Showing country-level results."
+        data = _request(base)
 
     if isinstance(data, dict) and data.get("error"):
         return {"error": str(data["error"]), "results": []}
@@ -59,7 +71,7 @@ def fetch_bing(query: str, cc: str, location: str, count: int, api_key: str) -> 
         if not link:
             continue
         results.append({"rank": i, "url": link, "title": item.get("title")})
-    return {"results": results}
+    return {"results": results, "note": note}
 
 
 class handler(BaseHTTPRequestHandler):
@@ -109,6 +121,6 @@ class handler(BaseHTTPRequestHandler):
         if out.get("error"):
             return self._send(502, {"error": out["error"], "query": q, "results": []})
         return self._send(200, {
-            "query": q, "cc": cc, "count": count,
+            "query": q, "cc": cc, "count": count, "note": out.get("note"),
             "provider": "serpapi-bing", "results": out["results"],
         })
