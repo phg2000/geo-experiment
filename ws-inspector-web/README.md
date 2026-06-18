@@ -78,6 +78,32 @@ Leave `APP_PASSWORD` unset only if you genuinely want it open.
   unverified self-report).
 - Citations are a lower bound on influence; self-report may omit/paraphrase/
   confabulate — which the 3-way reconciliation is designed to surface.
-- **Timeouts:** `maxDuration` is 60s (the Vercel Hobby max). A slow web-search
-  run can exceed that and return a 504 — just retry, or move to a plan with a
-  higher limit. There's no streaming here; it's a single request/response.
+- **Timeouts:** a slow web-search run can exceed Vercel's function limit and
+  return a **504 / FUNCTION_INVOCATION_TIMEOUT**. See "Tuning for the timeout"
+  below. There's no streaming here; it's a single request/response.
+
+## Tuning for the timeout
+
+Vercel's function duration cap is **60s on Hobby** (a hard limit) and up to
+**800s on Pro** with fluid compute. So there are two levers:
+
+**1. Cut the run's latency (helps on any plan).** Set these env vars:
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `OPENAI_REASONING_EFFORT` | `low` | `minimal` is fastest; `none` omits the param. Biggest latency lever with least loss to the consideration set. |
+| `WEB_SEARCH_CONTEXT_SIZE` | `medium` | `low` = fewer sources retrieved but faster; `high` = broadest but slowest. |
+
+If you're still timing out on Hobby, try `OPENAI_REASONING_EFFORT=minimal` and
+`WEB_SEARCH_CONTEXT_SIZE=low`. (The call degrades gracefully if a model rejects
+either param.) The `GET /api/inspect` health check echoes the active values.
+
+**2. Raise the ceiling (Pro only).** Bump `maxDuration` in `vercel.json`:
+
+```json
+{ "functions": { "api/inspect.py": { "maxDuration": 300 } } }
+```
+
+On Hobby this is capped at 60 regardless. For runs that routinely take minutes,
+the right fix is a **background job** (kick off the run, poll for the result)
+backed by a small store like Vercel KV / Upstash — not built here.
