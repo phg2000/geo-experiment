@@ -268,12 +268,12 @@ function render(d) {
   }
   root.append(s);
 
-  // Reconciliation
-  const r = d.reconciliation, c = r.counts;
+  // Reconciliation (guard against a malformed/partial result object)
+  const r = d.reconciliation || {}, c = r.counts || {};
   s = el("section");
   s.append(el("h2", null, "Reconciliation (3-way)"));
   s.append(el("div", "desc",
-    `citations=${c.citations} · runtime=${c.api_sources} · self-reported=${c.self_reported}`));
+    `citations=${c.citations ?? "?"} · runtime=${c.api_sources ?? "?"} · self-reported=${c.self_reported ?? "?"}`));
   const grid = el("div", "recon-grid");
   grid.append(reconCard("consulted_not_cited (runtime − cited)",
     "Surfaced by the tool but not cited — genuine retrieved-but-not-cited.", r.consulted_not_cited, ""));
