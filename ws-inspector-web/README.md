@@ -94,6 +94,28 @@ It's the actual payload sent to `responses.create` (echoed from the server, not
 reconstructed), so you can verify the prompt and location per run. It's included
 in the downloaded JSON too (`_request`).
 
+### Bing comparison matrix (experiment B)
+
+Each completed run has a **"Compare to Bing"** button. It fetches Bing's ranked
+results (via SerpAPI's Bing engine, `GET /api/serp`, key server-side) for each of
+the run's search queries — geo-matched to the run's `user_location` — and draws a
+matrix:
+
+- **columns** = the run's search queries (vertical headers),
+- **rows** = Bing rank 1…30,
+- **cell (rank, query)** colored by the URL Bing ranked there: **green** if the
+  model cited it, **red** if it was in the consideration set (consulted, not
+  cited), blank if Bing showed it but the model didn't surface it.
+
+How far down the green/red cells reach is the retrieval **depth/cutoff**, visible
+per query. URLs are normalized for matching. Consulted sources that Bing didn't
+rank in the top-30 (re-ranking / tenant mismatch / query variants) have no cell
+and are counted + listed separately. Results are cached per query in the browser
+session; the SerpAPI call honors `APP_PASSWORD` (cost gate). Caveat: OpenAI
+re-ranks on top of its backend and a SerpAPI scrape ≠ OpenAI's exact Bing view,
+so rank-matching is approximate — clustering near the top is suggestive, not
+proof of a hard cutoff.
+
 ### Batch / variability mode
 
 Set **Runs > 1** to repeat the same query N times. The browser starts N
@@ -114,6 +136,8 @@ use the `experiments/` CLI instead.)
 4. Add environment variables (Project → Settings → Environment Variables):
    - `OPENAI_API_KEY` — **required**. Your billable OpenAI key. Never commit it.
    - `APP_PASSWORD` — **strongly recommended** (see below).
+   - `SERPAPI_KEY` — optional; enables the "Compare to Bing" matrix (experiment B).
+     Get one at https://serpapi.com (free ~100 searches/mo).
 5. **Deploy.** Done — you get a `*.vercel.app` URL.
 
 No framework preset is needed; Vercel auto-detects the static `index.html` and

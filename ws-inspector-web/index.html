@@ -109,6 +109,21 @@
   .reqbox > summary { cursor: pointer; padding: 8px 0; color: var(--muted); }
   .reqrole { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--accent); margin: 10px 0 4px; }
   .reqbody pre { white-space: pre-wrap; word-break: break-word; }
+  /* Bing comparison matrix (experiment B) */
+  .matrix-wrap { overflow-x: auto; margin-top: 12px; }
+  table.matrix { border-collapse: collapse; }
+  table.matrix th.corner { text-align: right; padding: 4px 8px; color: var(--muted); font-size: 12px; vertical-align: bottom; }
+  table.matrix th.qh { writing-mode: vertical-rl; transform: rotate(180deg);
+    white-space: nowrap; font-weight: 500; font-size: 12px; color: var(--text);
+    padding: 6px 2px; max-height: 230px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+  table.matrix td.rk { text-align: right; padding: 0 8px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  table.matrix td.cell { width: 16px; height: 16px; border: 1px solid var(--bg); }
+  td.cell.green { background: #2e9e6b; }
+  td.cell.red { background: #d2603a; }
+  td.cell.blank { background: var(--panel2); }
+  td.cell.nodata { background: transparent; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0; font-size: 13px; color: var(--muted); align-items: center; }
+  .legend .sw { display: inline-block; width: 13px; height: 13px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
   /* markdown answer (render like the chat interface) */
   .md { line-height: 1.6; }
   .md > :first-child { margin-top: 0; }
@@ -249,6 +264,93 @@ async function geocode(name) {
 function formatLoc(ul) {
   if (!ul) return "";
   return [ul.city, ul.region, ul.country].filter(Boolean).join(", ");
+}
+
+// ---- Experiment B: Bing comparison matrix -----------------------------------
+async function fetchSerp(q, cc, location) {
+  const cacheKey = `serp:${cc}:${q}`;
+  try { const c = sessionStorage.getItem(cacheKey); if (c) return JSON.parse(c); } catch {}
+  const pw = ($("password") && $("password").value) || "";
+  const url = `/api/serp?q=${encodeURIComponent(q)}&cc=${encodeURIComponent(cc || "")}` +
+    `&location=${encodeURIComponent(location || "")}${pw ? "&password=" + encodeURIComponent(pw) : ""}`;
+  const res = await fetch(url);
+  const data = await readJson(res);
+  if (!res.ok) throw new Error(data.error || `SERP failed (${res.status})`);
+  try { sessionStorage.setItem(cacheKey, JSON.stringify(data)); } catch {}
+  return data;
+}
+
+async function compareToBing(d, container) {
+  const queries = [...new Set((d.search_queries || []).filter(Boolean))];
+  if (!queries.length) { container.textContent = "No search queries to compare."; return; }
+  const loc = d.user_location || {};
+  const cc = loc.country || "";
+  const locLabel = formatLoc(loc);
+  container.innerHTML = `<span class="spinner"></span> Fetching Bing results for ${queries.length} queries…`;
+  try {
+    const serps = await Promise.all(queries.map((q) => fetchSerp(q, cc, locLabel)));
+    renderMatrix(d, queries, serps, container);
+  } catch (err) {
+    container.innerHTML = `<div class="err">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderMatrix(d, queries, serps, container) {
+  const cited = new Set((d.citations || []).map((c) => normalizeUrl(c.url)).filter(Boolean));
+  const sources = new Set((d.api_sources || []).map((s) => normalizeUrl(s.url)).filter(Boolean));
+
+  // Per-query: rank -> {url, norm}. Depth = deepest SERP we got (capped at 30).
+  const cols = queries.map((q, i) => {
+    const results = (serps[i] && serps[i].results) || [];
+    const err = serps[i] && serps[i].error;
+    return { q, err, ranks: results.map((r) => ({ url: r.url, norm: normalizeUrl(r.url), title: r.title })) };
+  });
+  const depth = Math.min(30, Math.max(0, ...cols.map((c) => c.ranks.length)));
+
+  // URLs Bing surfaced anywhere (top-depth) — to count consulted-but-not-on-Bing.
+  const onBing = new Set();
+  cols.forEach((c) => c.ranks.slice(0, depth).forEach((r) => { if (r.norm) onBing.add(r.norm); }));
+  const consultedNotOnBing = [...sources].filter((u) => !onBing.has(u));
+
+  let html = `<div class="legend">` +
+    `<span><span class="sw" style="background:#2e9e6b"></span>cited (green)</span>` +
+    `<span><span class="sw" style="background:#d2603a"></span>consulted, not cited (red)</span>` +
+    `<span><span class="sw" style="background:var(--panel2)"></span>Bing result, model didn't surface it</span>` +
+    `</div>`;
+  if (!depth) {
+    container.innerHTML = html + `<div class="err">No Bing results returned (check SERPAPI_KEY, or all queries errored).</div>`;
+    return;
+  }
+
+  html += `<div class="matrix-wrap"><table class="matrix"><tr><th class="corner">rank ↓ / query →</th>`;
+  cols.forEach((c) => {
+    const label = c.q.length > 48 ? c.q.slice(0, 47) + "…" : c.q;
+    html += `<th class="qh" title="${escapeHtml(c.q)}${c.err ? " (ERROR: " + escapeHtml(c.err) + ")" : ""}">${escapeHtml(label)}</th>`;
+  });
+  html += `</tr>`;
+  for (let r = 0; r < depth; r++) {
+    html += `<tr><td class="rk">${r + 1}</td>`;
+    cols.forEach((c) => {
+      const item = c.ranks[r];
+      if (!item) { html += `<td class="cell nodata" title="(no result at this rank)"></td>`; return; }
+      let cls = "blank", status = "Bing result; model did not surface it";
+      if (item.norm && cited.has(item.norm)) { cls = "green"; status = "CITED"; }
+      else if (item.norm && sources.has(item.norm)) { cls = "red"; status = "consulted, not cited"; }
+      html += `<td class="cell ${cls}" title="#${r + 1} · ${escapeHtml(status)}\n${escapeHtml(item.url)}"></td>`;
+    });
+    html += `</tr>`;
+  }
+  html += `</table></div>`;
+
+  html += `<div class="desc" style="margin-top:10px">` +
+    `Depth shown: top ${depth} per query. ` +
+    `<b>${consultedNotOnBing.length}</b> of ${sources.size} consulted source(s) were NOT in any query's Bing top-${depth} ` +
+    `(re-ranking / tenant-mismatch / from a query variant) — so they have no cell here.</div>`;
+  if (consultedNotOnBing.length) {
+    html += `<details style="margin-top:6px"><summary>show the ${consultedNotOnBing.length} not on Bing</summary>` +
+      `<ul>${consultedNotOnBing.map((u) => `<li>${urlLine(u)}</li>`).join("")}</ul></details>`;
+  }
+  container.innerHTML = html;
 }
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 9 * 60 * 1000; // OpenAI retains background results ~10 min
@@ -647,6 +749,23 @@ function render(d, root) {
     "Model claims a source the runtime never reported — LIKELY CONFABULATED.", r.self_report_uncorroborated,
     r.self_report_uncorroborated?.length ? "bad" : ""));
   s.append(grid);
+  root.append(s);
+
+  // Bing comparison (experiment B)
+  s = el("section");
+  s.append(el("h2", null, "Bing comparison (SerpAPI) — experiment B"));
+  s.append(el("div", "desc", "Fetch Bing's ranked results for each of this run's search queries, then color each rank/query cell: " +
+    "<b style='color:#2e9e6b'>green</b> if that URL was cited, <b style='color:#d2603a'>red</b> if it was in the consideration set (consulted, not cited), blank otherwise. " +
+    "Reveals the retrieval depth/cutoff. Spends SerpAPI credits."));
+  if (!(d.search_queries || []).length) {
+    s.append(el("div", "desc", "No search queries for this run (web search off or none ran)."));
+  } else {
+    const btn = el("button", null, "Compare to Bing");
+    const cont = el("div");
+    btn.onclick = () => { btn.disabled = true; compareToBing(d, cont).finally(() => { btn.disabled = false; }); };
+    s.append(btn);
+    s.append(cont);
+  }
   root.append(s);
 
   // Usage

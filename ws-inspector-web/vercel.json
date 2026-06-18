@@ -3,6 +3,9 @@
   "functions": {
     "api/inspect.py": {
       "maxDuration": 60
+    },
+    "api/serp.py": {
+      "maxDuration": 30
     }
   },
   "headers": [
