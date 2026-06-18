@@ -104,17 +104,33 @@ def response_to_dict(response) -> dict:
 
 
 def extract_search_queries(output: list) -> list:
+    """Pull search query strings from every web_search_call item, in order.
+
+    An item's action may carry a singular `query`, a plural `queries` list, or
+    BOTH — so collect from both rather than treating them as exclusive. Within a
+    single item, de-dupe (a singular `query` often just repeats `queries[0]`);
+    across items, duplicates are preserved (a repeated search is informative).
+    """
     queries = []
     for item in output:
         if not isinstance(item, dict) or item.get("type") != "web_search_call":
             continue
         action = item.get("action") or {}
-        if isinstance(action, dict):
-            q = action.get("query")
-            if isinstance(q, str) and q.strip():
-                queries.append(q)
-            elif isinstance(action.get("queries"), list):
-                queries.extend(str(x) for x in action["queries"] if x)
+        if not isinstance(action, dict):
+            continue
+        local = []
+        q = action.get("query")
+        if isinstance(q, str) and q.strip():
+            local.append(q)
+        if isinstance(action.get("queries"), list):
+            for x in action["queries"]:
+                if isinstance(x, str) and x.strip():
+                    local.append(x)
+        seen = set()
+        for x in local:
+            if x not in seen:
+                seen.add(x)
+                queries.append(x)
     return queries
 
 
