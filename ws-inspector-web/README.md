@@ -96,10 +96,13 @@ in the downloaded JSON too (`_request`).
 
 ### Bing comparison matrix (experiment B)
 
-Each completed run has a **"Compare to Bing"** button. It fetches Bing's ranked
-results (via SerpAPI's Bing engine, `GET /api/serp`, key server-side) for each of
-the run's search queries — geo-matched to the run's `user_location` — and draws a
-matrix:
+Tick the **"Compare to Bing"** checkbox before inspecting (it's off by default,
+since it spends SerpAPI credits). When set, each completed run shows a Bing
+comparison section — auto-run for a single run, behind a **"Compare to Bing"**
+button per run in batch mode (so N runs don't fire N× SerpAPI calls without a
+click). It fetches Bing's ranked results (via SerpAPI's Bing engine,
+`GET /api/serp`, key server-side) for each of the run's search queries —
+geo-matched to the run's `user_location` — and draws a matrix:
 
 - **columns** = the run's search queries (vertical headers),
 - **rows** = Bing rank 1…30,

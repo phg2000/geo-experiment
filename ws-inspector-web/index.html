@@ -171,6 +171,7 @@
       </select>
     </label>
     <label class="wschk"><input type="checkbox" id="websearch" checked /> Web search</label>
+    <label class="wschk" title="After each run, fetch Bing's ranked results (SerpAPI) and draw the cited/consulted-vs-rank matrix. Spends SerpAPI credits."><input type="checkbox" id="bingcompare" /> Compare to Bing</label>
     <span id="modeHelp" class="modehelp"></span>
     <div class="locrow">
       <label>Location:
@@ -203,6 +204,7 @@ let batchQuery = "";
 let batchN = 1;
 let batchMode = "instrumented";
 let batchWebSearch = true;
+let batchBingCompare = false;  // run experiment B's Bing matrix for this batch?
 let analysisEl = null, runsEl = null;
 
 const MODE_HELP = {
@@ -385,6 +387,7 @@ $("form").addEventListener("submit", async (e) => {
   n = Math.max(1, Math.min(MAX_RUNS, n));
   const mode = $("mode") ? $("mode").value : "instrumented";
   const webSearch = $("websearch") ? $("websearch").checked : true;
+  const bingCompare = $("bingcompare") ? $("bingcompare").checked : false;
   const location = resolveLocation();
 
   stopPolling();
@@ -392,6 +395,7 @@ $("form").addEventListener("submit", async (e) => {
   $("results").innerHTML = "";
   jobs = []; renderedRuns = new Set(); runSlots = {}; batchQuery = query; batchN = n; batchMode = mode;
   batchWebSearch = webSearch;
+  batchBingCompare = bingCompare;
 
   // Skeleton: analysis area (filled at the end, n>1 only) + per-run area.
   analysisEl = el("div", "analysis"); analysisEl.style.display = "none";
@@ -493,6 +497,7 @@ function finalize(okN, failN, elapsed, timedOut) {
 
 function renderRun(j) {
   if (j.result && j.request) j.result._request = j.request;  // echo what we sent
+  if (j.result) j.result._bingCompare = batchBingCompare;    // did the user opt into experiment B?
   if (batchN === 1) { render(j.result, runsEl); return; }
   const r = j.result, slot = runSlots[j.index];
   const nq = (r.search_queries || []).length, na = (r.api_sources || []).length, nc = (r.citations || []).length;
@@ -751,22 +756,27 @@ function render(d, root) {
   s.append(grid);
   root.append(s);
 
-  // Bing comparison (experiment B)
-  s = el("section");
-  s.append(el("h2", null, "Bing comparison (SerpAPI) — experiment B"));
-  s.append(el("div", "desc", "Fetch Bing's ranked results for each of this run's search queries, then color each rank/query cell: " +
-    "<b style='color:#2e9e6b'>green</b> if that URL was cited, <b style='color:#d2603a'>red</b> if it was in the consideration set (consulted, not cited), blank otherwise. " +
-    "Reveals the retrieval depth/cutoff. Spends SerpAPI credits."));
-  if (!(d.search_queries || []).length) {
-    s.append(el("div", "desc", "No search queries for this run (web search off or none ran)."));
-  } else {
-    const btn = el("button", null, "Compare to Bing");
-    const cont = el("div");
-    btn.onclick = () => { btn.disabled = true; compareToBing(d, cont).finally(() => { btn.disabled = false; }); };
-    s.append(btn);
-    s.append(cont);
+  // Bing comparison (experiment B) — only when opted in via the form checkbox.
+  if (d._bingCompare) {
+    s = el("section");
+    s.append(el("h2", null, "Bing comparison (SerpAPI) — experiment B"));
+    s.append(el("div", "desc", "Fetch Bing's ranked results for each of this run's search queries, then color each rank/query cell: " +
+      "<b style='color:#2e9e6b'>green</b> if that URL was cited, <b style='color:#d2603a'>red</b> if it was in the consideration set (consulted, not cited), blank otherwise. " +
+      "Reveals the retrieval depth/cutoff. Spends SerpAPI credits."));
+    if (!(d.search_queries || []).length) {
+      s.append(el("div", "desc", "No search queries for this run (web search off or none ran)."));
+    } else {
+      const btn = el("button", null, "Compare to Bing");
+      const cont = el("div");
+      btn.onclick = () => { btn.disabled = true; compareToBing(d, cont).finally(() => { btn.disabled = false; }); };
+      s.append(btn);
+      s.append(cont);
+      // Single run: auto-run, since the user opted in up front. Batch: leave it
+      // to the button per run, to avoid N× SerpAPI spend without a deliberate click.
+      if (batchN === 1) { btn.disabled = true; compareToBing(d, cont).finally(() => { btn.disabled = false; }); }
+    }
+    root.append(s);
   }
-  root.append(s);
 
   // Usage
   s = el("section");
