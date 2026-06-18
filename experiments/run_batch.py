@@ -26,6 +26,8 @@ import os
 import re
 import sys
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,9 +44,27 @@ def slug(s: str, n: int = 40) -> str:
     return s[:n] or "query"
 
 
-def run_one(query: str, mode: str = "instrumented"):
+def geocode_location(name: str):
+    """Resolve a place name to a location dict via Open-Meteo's geocoding API."""
+    url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
+        {"name": name, "count": 1, "language": "en", "format": "json"})
+    with urllib.request.urlopen(url, timeout=15) as r:
+        data = json.load(r)
+    res = data.get("results") or []
+    if not res:
+        return None
+    g = res[0]
+    label = ", ".join(x for x in [g.get("name"), g.get("admin1"), g.get("country")] if x)
+    return {
+        "city": g.get("name"), "region": g.get("admin1") or "",
+        "country": g.get("country_code") or "", "country_name": g.get("country") or "",
+        "timezone": g.get("timezone") or "", "label": label,
+    }
+
+
+def run_one(query: str, mode: str = "instrumented", location=None):
     """Start a background run and poll until it completes. Returns (id, result)."""
-    started = _core.start_inspection(query, mode=mode)
+    started = _core.start_inspection(query, mode=mode, location=location)
     rid = started.get("id")
     if not rid:
         raise RuntimeError(f"No run id returned: {started}")
@@ -72,8 +92,18 @@ def main():
                     help="prompt mode: instrumented (+source dump), chatgpt (representative system "
                          "prompt), or bare (query only). Default instrumented.")
     ap.add_argument("--bare", action="store_true", help="alias for --mode bare")
+    ap.add_argument("--geocode", default=None, metavar="CITY",
+                    help="geo-target the web search to this place (resolved via Open-Meteo)")
     args = ap.parse_args()
     mode = "bare" if args.bare else args.mode
+
+    location = None
+    if args.geocode:
+        try:
+            location = geocode_location(args.geocode)
+            print(f"location: {location['label'] if location else '(no match)'}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] geocoding failed ({e}); proceeding with no location.", file=sys.stderr)
 
     if not os.environ.get("OPENAI_API_KEY"):
         sys.exit("ERROR: OPENAI_API_KEY is not set.")
@@ -85,16 +115,17 @@ def main():
 
     meta = {
         "query": args.query, "model": _core.MODEL, "requested_runs": args.runs,
-        "mode": mode, "started_at": ts, "interval_s": args.interval, "runs": [],
+        "mode": mode, "location": location, "started_at": ts, "interval_s": args.interval, "runs": [],
     }
-    print(f"Batch -> {base}   ({args.runs} runs, mode={mode}) of: {args.query!r}")
+    loc_str = f", location={location['label']}" if location else ""
+    print(f"Batch -> {base}   ({args.runs} runs, mode={mode}{loc_str}) of: {args.query!r}")
 
     for i in range(1, args.runs + 1):
         print(f"[{i}/{args.runs}] starting…", flush=True)
         rec = {"index": i}
         try:
             t0 = time.time()
-            rid, result = run_one(args.query, mode=mode)
+            rid, result = run_one(args.query, mode=mode, location=location)
             elapsed = round(time.time() - t0, 1)
             (base / f"{i:02d}.json").write_text(
                 json.dumps(result, indent=2, ensure_ascii=False, default=str))

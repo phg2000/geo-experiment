@@ -103,8 +103,18 @@ class handler(BaseHTTPRequestHandler):
             mode = normalize_mode(data.get("mode"))
         else:
             mode = MODE_INSTRUMENTED if data.get("instrument", True) else MODE_BARE
+
+        # Optional location: keep only known string fields (user-supplied).
+        location = None
+        loc_in = data.get("location")
+        if isinstance(loc_in, dict):
+            location = {k: str(loc_in[k]) for k in
+                        ("city", "region", "country", "country_name", "timezone", "label")
+                        if isinstance(loc_in.get(k), str) and loc_in.get(k).strip()}
+            location = location or None
+
         try:
-            started = start_inspection(query, mode=mode)  # {id, status}
+            started = start_inspection(query, mode=mode, location=location)  # {id, status}
         except Exception as e:
             return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 

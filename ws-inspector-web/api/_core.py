@@ -66,30 +66,77 @@ MODE_BARE = "bare"
 VALID_MODES = {MODE_INSTRUMENTED, MODE_CHATGPT, MODE_BARE}
 
 
-def chatgpt_system_prompt() -> str:
-    """A rough approximation of the consumer system prompt. Directional only."""
+def _loc_label(location) -> str:
+    """Human-readable 'City, Region, Country' from a location dict (or '')."""
+    if not location:
+        return ""
+    if location.get("label"):
+        return location["label"]
+    parts = [location.get(k) for k in ("city", "region", "country_name", "country")]
+    return ", ".join(p for p in parts if p)
+
+
+def chatgpt_system_prompt(location_label: str = "") -> str:
+    """A rough approximation of the consumer system prompt. Directional, NOT
+    faithful — the real product prompt is proprietary and changes. The location
+    paragraph is included only when a location is provided."""
+    loc_para = ""
+    if location_label:
+        loc_para = (
+            f"\n\nThe user's approximate location is {location_label}. Use it only "
+            "when relevant to the request, such as for local recommendations, regional "
+            "availability, or location-dependent information. Do not otherwise reference it."
+        )
     return (
-        "You are ChatGPT, a helpful assistant.\n"
-        f"Current date: {date.today().isoformat()}.\n"
-        "Respond conversationally. Use markdown formatting (headers, bold, lists, "
-        "tables) when it improves readability. When a question would benefit from "
-        "current information, use the web search tool. Be helpful and reasonably "
-        "thorough by default."
+        "You are ChatGPT, a large language model trained by OpenAI.\n"
+        "Knowledge cutoff: 2024-06\n"
+        f"Current date: {date.today().isoformat()}\n"
+        "Image input capabilities: Enabled\n"
+        "Personality: v2\n\n"
+        "You are a helpful, knowledgeable assistant. Engage warmly and conversationally "
+        "while being direct and substantive. Match your response length and detail to the "
+        "complexity of the question: keep simple answers brief, and go deeper when the "
+        "question warrants it. Use markdown formatting (headers, bold, lists, tables) "
+        "when it improves readability, but do not over-format simple replies.\n\n"
+        "When a question depends on current, recent, or fast-changing information, or when "
+        "you are not confident your training data is up to date, use the web search tool "
+        "before answering. Prefer searching over guessing for anything time-sensitive."
+        + loc_para +
+        "\n\nDo not reproduce song lyrics or any other copyrighted material, even if asked. "
+        "If you are asked what model you are, say you are based on GPT-5. You do not have a "
+        "hidden chain of thought or private reasoning tokens, and should not claim to."
     )
+
+
+def build_tools(location=None):
+    """Web-search tool, optionally geo-targeted via user_location. The location
+    actually steers search results (regional availability etc.), independent of
+    the prompt mode."""
+    tool = {"type": "web_search"}
+    if location:
+        ul = {"type": "approximate"}
+        for key in ("city", "region", "country", "timezone"):
+            v = location.get(key)
+            if isinstance(v, str) and v.strip():
+                ul[key] = v.strip()
+        if len(ul) > 1:  # at least one field beyond "type"
+            tool["user_location"] = ul
+    return [tool]
 
 
 def normalize_mode(mode) -> str:
     return mode if mode in VALID_MODES else MODE_INSTRUMENTED
 
 
-def build_input(user_query: str, mode: str = MODE_INSTRUMENTED):
-    """Build the Responses `input` for the chosen prompt mode (see above)."""
+def build_input(user_query: str, mode: str = MODE_INSTRUMENTED, location_label: str = ""):
+    """Build the Responses `input` for the chosen prompt mode (see above).
+    location_label is woven into the chatgpt persona prompt only."""
     mode = normalize_mode(mode)
     msgs = []
     if mode == MODE_INSTRUMENTED:
         msgs.append({"role": "system", "content": SOURCES_INSTRUCTION})
     elif mode == MODE_CHATGPT:
-        msgs.append({"role": "system", "content": chatgpt_system_prompt()})
+        msgs.append({"role": "system", "content": chatgpt_system_prompt(location_label)})
     # bare: no system message
     msgs.append({"role": "user", "content": user_query})
     return msgs
@@ -100,7 +147,7 @@ def build_input(user_query: str, mode: str = MODE_INSTRUMENTED):
 # =============================================================================
 
 
-def _call(client, user_query: str, mode: str = MODE_INSTRUMENTED):
+def _call(client, user_query: str, mode: str = MODE_INSTRUMENTED, location=None):
     from openai import (
         APIConnectionError,
         APITimeoutError,
@@ -114,8 +161,8 @@ def _call(client, user_query: str, mode: str = MODE_INSTRUMENTED):
         try:
             return client.responses.create(
                 model=MODEL,
-                tools=[WEB_SEARCH_TOOL],
-                input=build_input(user_query, mode),
+                tools=build_tools(location),
+                input=build_input(user_query, mode, _loc_label(location)),
                 include=INCLUDE_FIELDS,
             )
         except transient as err:
@@ -129,6 +176,15 @@ def _call(client, user_query: str, mode: str = MODE_INSTRUMENTED):
 # =============================================================================
 # Parsing
 # =============================================================================
+
+
+def extract_user_location(raw: dict):
+    """The user_location the run actually used, echoed back in the tool config."""
+    for t in (raw.get("tools") or []):
+        if isinstance(t, dict) and t.get("type") in ("web_search", "web_search_preview"):
+            if t.get("user_location"):
+                return t["user_location"]
+    return None
 
 
 def response_to_dict(response) -> dict:
@@ -433,6 +489,7 @@ def build_result(raw: dict, query: str, include_raw: bool = True,
         "query": query,
         "mode": mode,
         "instrumented": mode == MODE_INSTRUMENTED,
+        "user_location": extract_user_location(raw),
         "search_queries": extract_search_queries(output),
         "final_text": final_text,
         "citations": citations,
@@ -450,7 +507,8 @@ def build_result(raw: dict, query: str, include_raw: bool = True,
     return result
 
 
-def run_inspection(query: str, include_raw: bool = True, mode: str = MODE_INSTRUMENTED) -> dict:
+def run_inspection(query: str, include_raw: bool = True, mode: str = MODE_INSTRUMENTED,
+                   location=None) -> dict:
     """Synchronous path: run one inspection start-to-finish (blocks until done).
 
     Used by the CLI-style caller. The web app uses the background start/poll
@@ -459,7 +517,7 @@ def run_inspection(query: str, include_raw: bool = True, mode: str = MODE_INSTRU
     from openai import OpenAI
 
     client = OpenAI()
-    response = _call(client, query, mode)
+    response = _call(client, query, mode, location)
     return build_result(response_to_dict(response), query, include_raw, mode)
 
 
@@ -474,7 +532,7 @@ _OK_STATES = {"completed"}
 _PENDING_STATES = {"queued", "in_progress"}
 
 
-def start_inspection(query: str, mode: str = MODE_INSTRUMENTED) -> dict:
+def start_inspection(query: str, mode: str = MODE_INSTRUMENTED, location=None) -> dict:
     """Kick off a background run; return {id, status} immediately."""
     from openai import (
         OpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError,
@@ -487,8 +545,8 @@ def start_inspection(query: str, mode: str = MODE_INSTRUMENTED) -> dict:
         try:
             resp = client.responses.create(
                 model=MODEL,
-                tools=[WEB_SEARCH_TOOL],
-                input=build_input(query, mode),
+                tools=build_tools(location),
+                input=build_input(query, mode, _loc_label(location)),
                 include=INCLUDE_FIELDS,
                 background=True,
             )

@@ -90,6 +90,19 @@
     background: var(--panel); color: var(--text); font-size: 14px; }
   .opts label { display: inline-flex; gap: 8px; align-items: center; cursor: default; }
   .modehelp { display: block; margin-top: 6px; color: var(--muted); }
+  .locrow { margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .locrow > label { display: inline-flex; align-items: center; gap: 8px; }
+  .locwrap { position: relative; display: inline-block; }
+  #location { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); font-size: 14px; min-width: 260px; }
+  #locClear { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--text); font-size: 13px; cursor: pointer; }
+  .locresults { position: absolute; top: 100%; left: 0; right: 0; z-index: 20;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    margin-top: 4px; max-height: 240px; overflow: auto; display: none; }
+  .locresults.open { display: block; }
+  .locitem { padding: 8px 10px; cursor: pointer; font-size: 14px; }
+  .locitem:hover, .locitem.active { background: var(--panel2); }
   /* markdown answer (render like the chat interface) */
   .md { line-height: 1.6; }
   .md > :first-child { margin-top: 0; }
@@ -137,6 +150,17 @@
       </select>
     </label>
     <span id="modeHelp" class="modehelp"></span>
+    <div class="locrow">
+      <label>Location:
+        <span class="locwrap">
+          <input type="text" id="location" placeholder="start typing a city…" autocomplete="off" />
+          <div id="locResults" class="locresults"></div>
+        </span>
+      </label>
+      <button type="button" id="locClear">clear</button>
+      <span class="modehelp">Geo-targets the web search (any mode) and is named in the ChatGPT-like prompt.
+        Cities from Open-Meteo's geocoding API.</span>
+    </div>
   </div>
   <p class="note">Heads up: runs execute in OpenAI background mode (a few minutes each) and run
     in parallel, so N runs take about as long as one. Keep this tab open while it polls.
@@ -166,6 +190,57 @@ const MODE_HELP = {
 function updateModeHelp() {
   const m = $("mode") ? $("mode").value : "instrumented";
   if ($("modeHelp")) $("modeHelp").textContent = MODE_HELP[m] || "";
+}
+
+// ---- Location autocomplete (Open-Meteo geocoding, client-side) --------------
+let selectedLocation = {
+  city: "Palo Alto", region: "California", country: "US",
+  country_name: "United States", timezone: "America/Los_Angeles",
+  label: "Palo Alto, California, United States",
+};
+let geoTimer = null;
+
+function resolveLocation() {
+  // Returns the location object to send, based on the current input text.
+  const txt = ($("location") && $("location").value || "").trim();
+  if (!txt) return null;
+  if (selectedLocation && selectedLocation.label === txt) return selectedLocation;
+  return { city: txt, label: txt };  // free-text fallback (geocoding unused/unreached)
+}
+
+async function geocode(name) {
+  const box = $("locResults");
+  if (!name || name.length < 2) { box.classList.remove("open"); box.innerHTML = ""; return; }
+  try {
+    const u = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=6&language=en&format=json`;
+    const res = await fetch(u);
+    const data = await res.json();
+    const results = (data && data.results) || [];
+    if (!results.length) { box.classList.remove("open"); box.innerHTML = ""; return; }
+    box.innerHTML = "";
+    for (const r of results) {
+      const label = [r.name, r.admin1, r.country].filter(Boolean).join(", ");
+      const item = el("div", "locitem", escapeHtml(label));
+      item.onclick = () => {
+        selectedLocation = {
+          city: r.name, region: r.admin1 || "", country: r.country_code || "",
+          country_name: r.country || "", timezone: r.timezone || "", label,
+        };
+        $("location").value = label;
+        box.classList.remove("open"); box.innerHTML = "";
+      };
+      box.append(item);
+    }
+    box.classList.add("open");
+  } catch {
+    // Geocoding unreachable (offline/CORS) — silently allow free-text fallback.
+    box.classList.remove("open"); box.innerHTML = "";
+  }
+}
+
+function formatLoc(ul) {
+  if (!ul) return "";
+  return [ul.city, ul.region, ul.country].filter(Boolean).join(", ");
 }
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 9 * 60 * 1000; // OpenAI retains background results ~10 min
@@ -199,6 +274,7 @@ $("form").addEventListener("submit", async (e) => {
   if (!Number.isFinite(n)) n = 1;
   n = Math.max(1, Math.min(MAX_RUNS, n));
   const mode = $("mode") ? $("mode").value : "instrumented";
+  const location = resolveLocation();
 
   stopPolling();
   $("go").disabled = true;
@@ -225,7 +301,7 @@ $("form").addEventListener("submit", async (e) => {
     for (let i = 1; i <= n; i++) {
       const res = await fetch("/api/inspect", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, password, mode }),
+        body: JSON.stringify({ query, password, mode, location }),
       });
       const data = await readJson(res);
       if (res.status === 401) { $("pwRow").style.display = "flex"; throw new Error("Password required — enter it and try again."); }
@@ -453,6 +529,8 @@ function render(d, root) {
   let s = el("section");
   s.append(el("h2", null, "Query"));
   s.append(el("div", "q", escapeHtml(d.query)));
+  s.append(el("div", "desc", `mode: <b>${escapeHtml(d.mode || "?")}</b>` +
+    (d.user_location ? ` · location: <b>${escapeHtml(formatLoc(d.user_location))}</b>` : " · location: (none)")));
   root.append(s);
 
   // Search queries
@@ -606,6 +684,22 @@ function toMarkdown(d) {
 }
 
 if ($("mode")) { $("mode").addEventListener("change", updateModeHelp); updateModeHelp(); }
+if ($("location")) {
+  $("location").value = selectedLocation.label;
+  $("location").addEventListener("input", (e) => {
+    if (geoTimer) clearTimeout(geoTimer);
+    const v = e.target.value;
+    geoTimer = setTimeout(() => geocode(v.trim()), 250);
+  });
+  $("location").addEventListener("blur", () => setTimeout(() => $("locResults").classList.remove("open"), 150));
+}
+if ($("locClear")) {
+  $("locClear").addEventListener("click", () => {
+    selectedLocation = null;
+    $("location").value = "";
+    $("locResults").classList.remove("open"); $("locResults").innerHTML = "";
+  });
+}
 </script>
 </body>
 </html>

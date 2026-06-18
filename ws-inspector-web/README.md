@@ -62,6 +62,22 @@ memory, personalization, account/location context, and possibly a different
 model build / tool config that the API doesn't expose. This isolates the effect
 of the *system prompt*, not the entire gap.
 
+### Location
+
+The **Location** field geo-targets the run. The selected city is sent two ways,
+mirroring how the interface uses location:
+
+- as the web_search tool's `user_location` (`{type: approximate, city, region,
+  country, timezone}`) — this actually steers search results (regional
+  availability, local recs), in **every** prompt mode; and
+- named in the **ChatGPT-like** system prompt's location paragraph.
+
+Cities are resolved with the **Open-Meteo geocoding API** (free, no key) as you
+type — the call runs client-side in your browser. If geocoding is unreachable,
+free-text still works (it fills the prompt + a city-only `user_location`). The
+`user_location` the run actually used is echoed back in each result. The batch
+CLI has the same feature via `--geocode "Palo Alto"`.
+
 ### Batch / variability mode
 
 Set **Runs > 1** to repeat the same query N times. The browser starts N
