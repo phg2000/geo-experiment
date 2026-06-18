@@ -540,18 +540,21 @@ def start_inspection(query: str, mode: str = MODE_INSTRUMENTED, location=None) -
 
     transient = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
     client = OpenAI()
+    # Build the exact payload once and echo it back so the UI can show precisely
+    # what went out (system prompt, tools/user_location, include, etc.).
+    payload = {
+        "model": MODEL,
+        "tools": build_tools(location),
+        "input": build_input(query, mode, _loc_label(location)),
+        "include": INCLUDE_FIELDS,
+        "background": True,
+    }
     last_err = None
     for attempt in range(MAX_RETRIES):
         try:
-            resp = client.responses.create(
-                model=MODEL,
-                tools=build_tools(location),
-                input=build_input(query, mode, _loc_label(location)),
-                include=INCLUDE_FIELDS,
-                background=True,
-            )
+            resp = client.responses.create(**payload)
             raw = response_to_dict(resp)
-            return {"id": raw.get("id"), "status": raw.get("status") or "queued"}
+            return {"id": raw.get("id"), "status": raw.get("status") or "queued", "request": payload}
         except transient as err:
             last_err = err
             if attempt == MAX_RETRIES - 1:

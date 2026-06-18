@@ -103,6 +103,11 @@
   .locresults.open { display: block; }
   .locitem { padding: 8px 10px; cursor: pointer; font-size: 14px; }
   .locitem:hover, .locitem.active { background: var(--panel2); }
+  .reqbox { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 6px 16px; margin-top: 16px; }
+  .reqbox > summary { cursor: pointer; padding: 8px 0; color: var(--muted); }
+  .reqrole { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--accent); margin: 10px 0 4px; }
+  .reqbody pre { white-space: pre-wrap; word-break: break-word; }
   /* markdown answer (render like the chat interface) */
   .md { line-height: 1.6; }
   .md > :first-child { margin-top: 0; }
@@ -310,7 +315,7 @@ $("form").addEventListener("submit", async (e) => {
         if (res.status >= 500 && /OPENAI_API_KEY/.test(data.error || "")) throw new Error(data.error);
         jobs.push({ index: i, id: null, status: "failed", error: data.error || `start failed (${res.status})` });
       } else {
-        jobs.push({ index: i, id: data.id, status: "queued" });
+        jobs.push({ index: i, id: data.id, status: "queued", request: data.request });
       }
       setStatus(`<span class="spinner"></span>Started ${i}/${n}…`);
       if (i < n) await sleep(300);
@@ -380,6 +385,7 @@ function finalize(okN, failN, elapsed, timedOut) {
 }
 
 function renderRun(j) {
+  if (j.result && j.request) j.result._request = j.request;  // echo what we sent
   if (batchN === 1) { render(j.result, runsEl); return; }
   const r = j.result, slot = runSlots[j.index];
   const nq = (r.search_queries || []).length, na = (r.api_sources || []).length, nc = (r.citations || []).length;
@@ -525,6 +531,27 @@ function renderMarkdown(text) {
 
 function render(d, root) {
   // Renders one run's full result into `root` (a container element).
+
+  // Raw API request (collapsed) — exactly what we sent to the API.
+  if (d._request) {
+    const det = el("details", "reqbox");
+    det.append(el("summary", null, "Raw API request sent (system prompt, tools, input)"));
+    const body = el("div", "reqbody");
+    for (const msg of (d._request.input || [])) {
+      body.append(el("div", "reqrole", escapeHtml(String(msg.role || "").toUpperCase()) +
+        (String(msg.role) === "system" ? " (system prompt)" : "")));
+      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content, null, 2);
+      body.append(el("pre", null, escapeHtml(content)));
+    }
+    body.append(el("div", "reqrole", "MODEL / TOOLS / CONFIG"));
+    body.append(el("pre", null, escapeHtml(JSON.stringify({
+      model: d._request.model, tools: d._request.tools,
+      include: d._request.include, background: d._request.background,
+    }, null, 2))));
+    det.append(body);
+    root.append(det);
+  }
+
   // Query
   let s = el("section");
   s.append(el("h2", null, "Query"));

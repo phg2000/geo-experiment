@@ -78,6 +78,15 @@ free-text still works (it fills the prompt + a city-only `user_location`). The
 `user_location` the run actually used is echoed back in each result. The batch
 CLI has the same feature via `--geocode "Palo Alto"`.
 
+### Raw API request echo
+
+Each run's output starts with a collapsed **"Raw API request sent"** section
+showing exactly what went out — the system prompt (verbatim), the `input`
+messages, and the model/tools/`user_location`/`include`/`background` config.
+It's the actual payload sent to `responses.create` (echoed from the server, not
+reconstructed), so you can verify the prompt and location per run. It's included
+in the downloaded JSON too (`_request`).
+
 ### Batch / variability mode
 
 Set **Runs > 1** to repeat the same query N times. The browser starts N
