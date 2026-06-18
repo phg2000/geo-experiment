@@ -105,7 +105,18 @@ $("form").addEventListener("submit", async (e) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, password }),
     });
-    const data = await res.json();
+    // Read as text first: a crashed/timed-out function returns a non-JSON
+    // page (e.g. "A server error has occurred" or a 504), which would otherwise
+    // blow up res.json(). Parse defensively and show something readable.
+    const raw = await res.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch {
+      const hint = res.status === 504
+        ? "The run took longer than the 60s function limit (504). Try a simpler query or retry."
+        : `Server returned a non-JSON response (HTTP ${res.status}).`;
+      throw new Error(`${hint}\n\n${raw.slice(0, 300)}`);
+    }
     if (res.status === 401) {
       authRequired = true;
       $("pwRow").style.display = "flex";
