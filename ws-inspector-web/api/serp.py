@@ -15,6 +15,7 @@ Env vars (Vercel project settings):
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler
@@ -32,8 +33,22 @@ def fetch_bing(query: str, cc: str, location: str, count: int, api_key: str) -> 
         params["location"] = location
     url = SERPAPI_URL + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": "ws-inspector/1.0"})
-    with urllib.request.urlopen(req, timeout=25) as r:
-        data = json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        # SerpAPI puts a useful message in the JSON body (e.g. invalid API key);
+        # urllib raises before we can read it, so surface it here.
+        msg = f"HTTP {e.code}"
+        try:
+            body = json.loads(e.read().decode("utf-8", "replace"))
+            if isinstance(body, dict) and body.get("error"):
+                msg = str(body["error"])
+        except Exception:
+            pass
+        if e.code == 401:
+            msg = f"SerpAPI rejected the key (401): {msg}"
+        return {"error": msg, "results": []}
 
     if isinstance(data, dict) and data.get("error"):
         return {"error": str(data["error"]), "results": []}
@@ -74,7 +89,7 @@ class handler(BaseHTTPRequestHandler):
         if required and (params.get("password") or [""])[0] != required:
             return self._send(401, {"error": "Unauthorized: wrong or missing password."})
 
-        api_key = os.environ.get("SERPAPI_KEY")
+        api_key = (os.environ.get("SERPAPI_KEY") or "").strip()
         if not api_key:
             return self._send(500, {"error": "Server is missing SERPAPI_KEY env var."})
 
