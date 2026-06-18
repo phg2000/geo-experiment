@@ -118,7 +118,14 @@ key (protocol, leading `www.`, query params and fragment dropped) so that
 `www`/`http`-vs-`https`/tracking-param differences don't hide genuine matches.
 The section also dumps the **raw Bing results per query** and the **full
 consulted set**, so you can eyeball any matches the keying still misses. Results
-are cached per query in the browser
+A **"match by domain"** toggle re-colors cells on a same-site basis (so Bing's
+homepage for `usp.org` matches a deep `usp.org/...` page the model consulted),
+and a domain-level overlap stat is always shown. The Bing request is pinned to
+`mkt=en-US` (derived from the run's country) to avoid international junk results.
+Note that OpenAI's web_search is a re-ranked layer over its own search backend,
+not raw Bing, and `site:` queries are unreliable on a Bing scrape — so expect
+modest page-level overlap; the domain view is the more meaningful comparison.
+Results are cached per query in the browser
 session; the SerpAPI call honors `APP_PASSWORD` (cost gate). Caveat: OpenAI
 re-ranks on top of its backend and a SerpAPI scrape ≠ OpenAI's exact Bing view,
 so rank-matching is approximate — clustering near the top is suggestive, not

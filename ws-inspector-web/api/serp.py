@@ -49,6 +49,9 @@ def _request(params: dict) -> dict:
 
 def fetch_bing(query: str, cc: str, location: str, count: int, api_key: str) -> dict:
     base = {"engine": "bing", "q": query, "api_key": api_key, "count": count}
+    # Force a market/language, or Bing returns international junk (baidu, zhihu,
+    # chiebukuro) for English supplement queries. cc is a 2-letter ISO code.
+    base["mkt"] = f"en-{cc.upper()}" if cc else "en-US"
     if cc:
         base["cc"] = cc.lower()
 

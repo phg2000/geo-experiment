@@ -297,19 +297,29 @@ async function compareToBing(d, container) {
   }
 }
 
-function renderMatrix(d, queries, serps, container) {
-  // Match on the loose key (host+path), so www/scheme/tracking-param noise
-  // doesn't hide genuine matches between the model's URLs and Bing's.
-  const cited = new Set((d.citations || []).map((c) => looseUrl(c.url)).filter(Boolean));
-  const sources = new Set((d.api_sources || []).map((s) => looseUrl(s.url)).filter(Boolean));
+const domainOf = (u) => { const l = looseUrl(u); return l ? l.split("/")[0] : null; };
+function renderMatrix(d, queries, serps, container, mode) {
+  mode = mode || "page";  // "page" = host+path match; "domain" = same-site match
+  const keyOf = mode === "domain" ? domainOf : looseUrl;
+  // Match on the loose key, so www/scheme/tracking-param noise doesn't hide
+  // genuine matches between the model's URLs and Bing's.
+  const cited = new Set((d.citations || []).map((c) => keyOf(c.url)).filter(Boolean));
+  const sources = new Set((d.api_sources || []).map((s) => keyOf(s.url)).filter(Boolean));
 
   // Per-query: rank -> {url, norm}. Depth = deepest SERP we got (capped at 30).
   const cols = queries.map((q, i) => {
     const results = (serps[i] && serps[i].results) || [];
     const err = serps[i] && serps[i].error;
-    return { q, err, ranks: results.map((r) => ({ url: r.url, norm: looseUrl(r.url), title: r.title })) };
+    return { q, err, ranks: results.map((r) => ({ url: r.url, norm: keyOf(r.url), title: r.title })) };
   });
   const depth = Math.min(30, Math.max(0, ...cols.map((c) => c.ranks.length)));
+
+  // Domain-level overlap stat (mode-independent), the more believable "is the
+  // model drawing from the same sources as Bing" number.
+  const consultedDomains = new Set((d.api_sources || []).map((s) => domainOf(s.url)).filter(Boolean));
+  const bingDomains = new Set();
+  cols.forEach((c) => c.ranks.slice(0, depth).forEach((r) => { const dd = domainOf(r.url); if (dd) bingDomains.add(dd); }));
+  const domOverlap = [...consultedDomains].filter((x) => bingDomains.has(x));
 
   // URLs Bing surfaced anywhere (top-depth) — to count consulted-but-not-on-Bing.
   const onBing = new Set();
@@ -325,6 +335,8 @@ function renderMatrix(d, queries, serps, container) {
     `<span><span class="sw" style="background:#2e9e6b"></span>cited (green)</span>` +
     `<span><span class="sw" style="background:#d2603a"></span>consulted, not cited (red)</span>` +
     `<span><span class="sw" style="background:var(--panel2)"></span>Bing result, model didn't surface it</span>` +
+    `<label class="wschk" style="margin-left:auto"><input type="checkbox" id="matchModeToggle"${mode === "domain" ? " checked" : ""}/> ` +
+    `match by domain (looser — same site, any page)</label>` +
     `</div>`;
   if (!depth) {
     container.innerHTML = html + `<div class="err">No Bing results returned (check SERPAPI_KEY, or all queries errored).</div>`;
@@ -352,9 +364,14 @@ function renderMatrix(d, queries, serps, container) {
   html += `</table></div>`;
 
   html += `<div class="desc" style="margin-top:10px">` +
-    `Depth shown: top ${depth} per query. ` +
-    `<b>${consultedNotOnBing.length}</b> of ${sources.size} consulted source(s) were NOT in any query's Bing top-${depth} ` +
+    `Matching by <b>${mode === "domain" ? "domain (same site)" : "page (host+path)"}</b>. Depth shown: top ${depth} per query. ` +
+    `<b>${consultedNotOnBing.length}</b> of ${sources.size} consulted ${mode === "domain" ? "domain" : "source"}(s) were NOT in any query's Bing top-${depth} ` +
     `(re-ranking / tenant-mismatch / from a query variant) — so they have no cell here.</div>`;
+  html += `<div class="desc">Domain-level overlap (regardless of page): ` +
+    `<b>${domOverlap.length}</b> of ${consultedDomains.size} consulted domains also appear in Bing's top-${depth} ` +
+    `(${bingDomains.size} distinct domains across all queries).` +
+    (domOverlap.length ? ` Shared: ${domOverlap.slice(0, 20).map(escapeHtml).join(", ")}${domOverlap.length > 20 ? "…" : ""}.` : "") +
+    `</div>`;
   if (consultedNotOnBing.length) {
     html += `<details style="margin-top:6px"><summary>show the ${consultedNotOnBing.length} not on Bing</summary>` +
       `<ul>${consultedNotOnBing.map((u) => `<li>${urlLine("https://" + u)}</li>`).join("")}</ul></details>`;
@@ -385,6 +402,8 @@ function renderMatrix(d, queries, serps, container) {
     `<ul>${allConsulted.map((u) => `<li>${urlLine("https://" + u)}</li>`).join("")}</ul></details>`;
 
   container.innerHTML = html;
+  const tog = container.querySelector("#matchModeToggle");
+  if (tog) tog.onchange = () => renderMatrix(d, queries, serps, container, tog.checked ? "domain" : "page");
 }
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 9 * 60 * 1000; // OpenAI retains background results ~10 min
