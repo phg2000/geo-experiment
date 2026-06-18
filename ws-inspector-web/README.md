@@ -38,6 +38,30 @@ identical to a synchronous run. Nothing is persisted server-side (serverless has
 no writable disk); OpenAI retains the background result for ~10 minutes, and the
 `.json` / `.md` downloads are generated client-side.
 
+### Prompt modes
+
+The **Prompt mode** selector controls the system prompt sent with the query, so
+you can trade instrumentation for fidelity to the chat interface:
+
+- **Instrumented** (default) — appends our "list every source" instruction.
+  Gives the self-reported tier, but perturbs the model's search/answer behavior.
+- **ChatGPT-like** — sends a representative persona prompt (current date, helpful
+  assistant, markdown, willingness to search). **Directional, NOT faithful:** the
+  real consumer system prompt is proprietary and changes often; this only induces
+  a similar register/formatting/tool-use. No source dump.
+- **Bare** — only the user query, no system message; the most neutral baseline.
+
+In ChatGPT-like and Bare modes the self-report tier is intentionally empty, but
+citations and the runtime consideration set (`action.sources`, a non-perturbing
+`include` flag) are unaffected. The final answer is rendered as **markdown**
+(headers, bold, tables, links) via `marked` + `DOMPurify`, so it reads like the
+interface; if those CDN libs don't load it falls back to plain text.
+
+Note: even ChatGPT-like mode is not the chat interface — the product also has
+memory, personalization, account/location context, and possibly a different
+model build / tool config that the API doesn't expose. This isolates the effect
+of the *system prompt*, not the entire gap.
+
 ### Batch / variability mode
 
 Set **Runs > 1** to repeat the same query N times. The browser starts N

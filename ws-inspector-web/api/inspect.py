@@ -27,10 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 _IMPORT_ERROR = None
 try:
-    from _core import start_inspection, poll_inspection, MODEL
+    from _core import start_inspection, poll_inspection, normalize_mode, MODE_BARE, MODE_INSTRUMENTED, MODEL
 except Exception as e:  # noqa: BLE001
     _IMPORT_ERROR = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
     start_inspection = poll_inspection = None
+    normalize_mode = lambda m: m  # noqa: E731
+    MODE_BARE, MODE_INSTRUMENTED = "bare", "instrumented"
     MODEL = "unknown"
 
 
@@ -69,9 +71,9 @@ class handler(BaseHTTPRequestHandler):
         if _IMPORT_ERROR is not None:
             return self._send(500, {"error": "Function failed to load.", "detail": _IMPORT_ERROR})
         query = (params.get("query") or [""])[0]
-        instrument = (params.get("instrument") or ["1"])[0] not in ("0", "false", "False")
+        mode = normalize_mode((params.get("mode") or [MODE_INSTRUMENTED])[0])
         try:
-            return self._send(200, poll_inspection(run_id, query, instrumented=instrument))
+            return self._send(200, poll_inspection(run_id, query, mode=mode))
         except Exception as e:  # invalid id, expired, network, etc.
             return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
@@ -96,12 +98,16 @@ class handler(BaseHTTPRequestHandler):
         if not os.environ.get("OPENAI_API_KEY"):
             return self._send(500, {"error": "Server is missing OPENAI_API_KEY env var."})
 
-        instrument = bool(data.get("instrument", True))
+        # Accept `mode`; fall back to legacy `instrument` boolean if present.
+        if "mode" in data:
+            mode = normalize_mode(data.get("mode"))
+        else:
+            mode = MODE_INSTRUMENTED if data.get("instrument", True) else MODE_BARE
         try:
-            started = start_inspection(query, instrumented=instrument)  # {id, status}
+            started = start_inspection(query, mode=mode)  # {id, status}
         except Exception as e:
             return self._send(502, {"error": f"{type(e).__name__}: {e}", "detail": traceback.format_exc()})
 
         started["_auth_required"] = bool(required)
-        started["_instrumented"] = instrument
+        started["_mode"] = mode
         return self._send(200, started)
