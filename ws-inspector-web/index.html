@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Web-Search Raw Run Inspector</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a21; --panel2: #1e222b; --border: #2a2f3a;
+    --text: #e6e8ec; --muted: #9aa3b2; --accent: #5b9dff;
+    --truth: #34d399; --runtime: #5b9dff; --unverified: #f59e0b; --danger: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+  form { display: flex; gap: 10px; flex-wrap: wrap; }
+  input[type=text], input[type=password] {
+    flex: 1; min-width: 220px; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 15px; }
+  button { padding: 12px 20px; border-radius: 10px; border: 0; cursor: pointer;
+    background: var(--accent); color: #fff; font-weight: 600; font-size: 15px; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  #pwRow { display: none; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  .status { margin-top: 18px; }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+    vertical-align: -3px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .err { color: var(--danger); background: #2a1414; border: 1px solid #5a2020;
+    padding: 12px 14px; border-radius: 10px; margin-top: 18px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; margin-top: 16px; }
+  section h2 { font-size: 14px; letter-spacing: .02em; margin: 0 0 4px;
+    display: flex; align-items: center; gap: 10px; }
+  .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: .04em; }
+  .b-truth { background: rgba(52,211,153,.15); color: var(--truth); border: 1px solid rgba(52,211,153,.4); }
+  .b-runtime { background: rgba(91,157,255,.15); color: var(--runtime); border: 1px solid rgba(91,157,255,.4); }
+  .b-unverified { background: rgba(245,158,11,.15); color: var(--unverified); border: 1px solid rgba(245,158,11,.4); }
+  .desc { color: var(--muted); font-size: 13px; margin: 2px 0 12px; }
+  ol, ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 6px 0; }
+  a { color: var(--accent); word-break: break-all; }
+  .title { color: var(--text); }
+  .excerpt { color: var(--muted); font-size: 13px; font-style: italic; }
+  .answer { white-space: pre-wrap; background: var(--panel2); border-radius: 8px; padding: 12px 14px; }
+  .q { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  .recon-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .recon-grid { grid-template-columns: 1fr; } }
+  .recon-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .recon-card h3 { margin: 0 0 6px; font-size: 13px; }
+  .recon-card.bad { border-color: rgba(248,113,113,.45); }
+  .recon-card.bad h3 { color: var(--danger); }
+  .recon-card.good h3 { color: var(--truth); }
+  .empty { color: var(--muted); font-size: 13px; }
+  .usage { font-family: ui-monospace, monospace; font-size: 13px; color: var(--muted); }
+  .downloads { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .downloads button { background: var(--panel2); border: 1px solid var(--border); color: var(--text); font-weight: 500; }
+  details { margin-top: 16px; }
+  summary { cursor: pointer; color: var(--muted); }
+  pre { overflow: auto; background: var(--panel2); padding: 12px; border-radius: 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Web-Search Raw Run Inspector</h1>
+  <p class="sub">One query → the raw anatomy of a single ChatGPT web-search run:
+    queries, answer, citations (ground truth), the runtime consideration set, and
+    the model's self-report (unverified).</p>
+
+  <form id="form">
+    <input type="text" id="query" placeholder="e.g. what's the best supplement for building muscle?" autocomplete="off" />
+    <div id="pwRow" style="flex-basis:100%; display:flex; gap:10px;">
+      <input type="password" id="password" placeholder="password" autocomplete="off" style="flex:1;" />
+    </div>
+    <button type="submit" id="go">Inspect</button>
+  </form>
+  <p class="note">Heads up: a run can take 30–60s (the model searches, reads, and writes a sources dump).
+    It calls a billable OpenAI model.</p>
+
+  <div id="status" class="status"></div>
+  <div id="results"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let lastResult = null;
+let authRequired = false; // toggled true if server returns 401
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const query = $("query").value.trim();
+  if (!query) return;
+  const password = $("password") ? $("password").value : "";
+  $("go").disabled = true;
+  $("results").innerHTML = "";
+  $("status").innerHTML = `<span class="spinner"></span>Running web search & inspecting… (up to ~60s)`;
+  try {
+    const res = await fetch("/api/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, password }),
+    });
+    const data = await res.json();
+    if (res.status === 401) {
+      authRequired = true;
+      $("pwRow").style.display = "flex";
+      throw new Error("This instance is password-protected. Enter the password and try again.");
+    }
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    lastResult = data;
+    if (data._auth_required) $("pwRow").style.display = "flex";
+    $("status").innerHTML = "";
+    render(data);
+  } catch (err) {
+    $("status").innerHTML = "";
+    $("results").innerHTML = `<div class="err">${escapeHtml(err.message)}</div>`;
+  } finally {
+    $("go").disabled = false;
+  }
+});
+
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function linkList(items, render) {
+  if (!items || !items.length) return `<p class="empty">(none)</p>`;
+  return "<ol>" + items.map(render).join("") + "</ol>";
+}
+function urlLine(u) {
+  return `<a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a>`;
+}
+
+function render(d) {
+  const root = $("results");
+  root.innerHTML = "";
+
+  // Query
+  let s = el("section");
+  s.append(el("h2", null, "Query"));
+  s.append(el("div", "q", escapeHtml(d.query)));
+  root.append(s);
+
+  // Search queries
+  s = el("section");
+  s.append(el("h2", null, "Search queries the model ran"));
+  s.append(el("div", null, d.search_queries?.length
+    ? "<ol>" + d.search_queries.map(q => `<li class="q">${escapeHtml(q)}</li>`).join("") + "</ol>"
+    : `<p class="empty">(none captured)</p>`));
+  root.append(s);
+
+  // Final answer
+  s = el("section");
+  s.append(el("h2", null, "Final answer text"));
+  s.append(el("div", "answer", escapeHtml(d.final_text || "(empty)")));
+  root.append(s);
+
+  // Citations — ground truth
+  s = el("section");
+  s.append(el("h2", null, `Citations <span class="badge b-truth">Ground truth</span>`));
+  s.append(el("div", "desc", "From the answer's <code>url_citation</code> annotations — the verifiable record of what was actually cited."));
+  s.append(el("div", null, linkList(d.citations, c =>
+    `<li>${urlLine(c.url)}<br><span class="title">${escapeHtml(c.title || "")}</span></li>`)));
+  root.append(s);
+
+  // Runtime consideration set
+  s = el("section");
+  s.append(el("h2", null, `Consideration set <span class="badge b-runtime">Runtime-reported</span>`));
+  s.append(el("div", "desc", "URLs the web_search tool actually surfaced (cited or not), from <code>action.sources</code>. Comes from the runtime, not the model — can't be confabulated. (URLs/titles only, not passage text.)"));
+  s.append(el("div", null, linkList(d.api_sources, x =>
+    `<li>${urlLine(x.url)}<br><span class="title">${escapeHtml(x.title || "")}</span></li>`)));
+  root.append(s);
+
+  // Self-reported — unverified
+  s = el("section");
+  s.append(el("h2", null, `Self-reported sources <span class="badge b-unverified">Unverified</span>`));
+  s.append(el("div", "desc", "Parsed from a block the <em>model</em> appended. May omit, paraphrase, or confabulate. Its unique value is the verbatim excerpt text the API doesn't return."));
+  s.append(el("div", null, linkList(d.self_reported_sources, x => {
+    const u = x.url || x.url_unrecoverable_note || "(no url)";
+    const urlPart = x.url ? urlLine(x.url) : escapeHtml(u);
+    return `<li>${urlPart}<br><span class="title">${escapeHtml(x.title || "")}</span>` +
+      (x.excerpt ? `<br><span class="excerpt">“${escapeHtml(x.excerpt)}”</span>` : "") + `</li>`;
+  })));
+  const f = d.self_reported_flags;
+  if (f && f.partial_or_malformed) {
+    s.append(el("div", "err", "⚠ " + escapeHtml((f.notes || []).join(" ") || "partial/malformed")));
+  }
+  root.append(s);
+
+  // Reconciliation
+  const r = d.reconciliation, c = r.counts;
+  s = el("section");
+  s.append(el("h2", null, "Reconciliation (3-way)"));
+  s.append(el("div", "desc",
+    `citations=${c.citations} · runtime=${c.api_sources} · self-reported=${c.self_reported}`));
+  const grid = el("div", "recon-grid");
+  grid.append(reconCard("consulted_not_cited (runtime − cited)",
+    "Surfaced by the tool but not cited — genuine retrieved-but-not-cited.", r.consulted_not_cited, ""));
+  grid.append(reconCard("cited_not_in_api (cited − runtime)",
+    "Cited but absent from the runtime list — unexpected; worth a look.", r.cited_not_in_api,
+    r.cited_not_in_api?.length ? "bad" : ""));
+  grid.append(reconCard("self_report_corroborated (self ∩ runtime)",
+    "Model listed it AND the runtime confirms it — excerpt now plausible.", r.self_report_corroborated, "good"));
+  grid.append(reconCard("self_report_UNCORROBORATED (self − runtime)",
+    "Model claims a source the runtime never reported — LIKELY CONFABULATED.", r.self_report_uncorroborated,
+    r.self_report_uncorroborated?.length ? "bad" : ""));
+  s.append(grid);
+  root.append(s);
+
+  // Usage
+  s = el("section");
+  s.append(el("h2", null, "Token usage"));
+  s.append(el("div", "usage",
+    `input ${d.usage?.input_tokens ?? "?"} · output ${d.usage?.output_tokens ?? "?"} · total ${d.usage?.total_tokens ?? "?"}`));
+  root.append(s);
+
+  // Downloads
+  const dl = el("div", "downloads");
+  const jbtn = el("button", null, "⬇ Download .json");
+  jbtn.onclick = () => download(`${stamp()}.json`, JSON.stringify(d, null, 2), "application/json");
+  const mbtn = el("button", null, "⬇ Download .md");
+  mbtn.onclick = () => download(`${stamp()}.md`, toMarkdown(d), "text/markdown");
+  dl.append(jbtn, mbtn);
+  root.append(dl);
+
+  // Raw
+  const det = el("details");
+  det.append(el("summary", null, "Raw response object"));
+  det.append(el("pre", null, escapeHtml(JSON.stringify(d.raw_response ?? {}, null, 2))));
+  root.append(det);
+}
+
+function reconCard(title, desc, items, kind) {
+  const card = el("div", "recon-card" + (kind ? " " + kind : ""));
+  card.append(el("h3", null, escapeHtml(title)));
+  card.append(el("div", "desc", desc));
+  card.append(el("div", null, items && items.length
+    ? "<ul>" + items.map(u => `<li>${urlLine(u)}</li>`).join("") + "</ul>"
+    : `<p class="empty">(none)</p>`));
+  return card;
+}
+
+function stamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-").replace("Z", "Z");
+}
+function download(name, content, type) {
+  const blob = new Blob([content], { type });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function toMarkdown(d) {
+  const L = [];
+  const list = (arr, f) => arr && arr.length ? arr.map(f).join("\n") : "_(none)_";
+  L.push(`# Web-Search Raw Run`, "", `- model: \`${d.model}\``, "", "## Query", "", "> " + (d.query || ""), "");
+  L.push("## Search queries", "", list(d.search_queries, (q, i) => `${i + 1}. ${q}`), "");
+  L.push("## Final answer", "", d.final_text || "_(empty)_", "");
+  L.push("## Citations — GROUND TRUTH", "",
+    list(d.citations, (c, i) => `${i + 1}. [${c.title || c.url}](${c.url})`), "");
+  L.push("## Consideration set — RUNTIME-REPORTED (action.sources)", "",
+    list(d.api_sources, (x, i) => `${i + 1}. [${x.title || x.url}](${x.url})`), "");
+  L.push("## Self-reported sources — UNVERIFIED", "",
+    list(d.self_reported_sources, (x, i) =>
+      `${i + 1}. ${x.url || x.url_unrecoverable_note || "(no url)"}` +
+      (x.title ? ` — ${x.title}` : "") + (x.excerpt ? `\n   > ${x.excerpt}` : "")), "");
+  const r = d.reconciliation;
+  L.push("## Reconciliation (3-way)", "",
+    `- consulted_not_cited: ${list(r.consulted_not_cited, u => u)}`,
+    `- cited_not_in_api: ${list(r.cited_not_in_api, u => u)}`,
+    `- self_report_corroborated: ${list(r.self_report_corroborated, u => u)}`,
+    `- self_report_uncorroborated (likely confabulated): ${list(r.self_report_uncorroborated, u => u)}`, "");
+  L.push("## Token usage", "",
+    `- input: ${d.usage?.input_tokens}`, `- output: ${d.usage?.output_tokens}`, `- total: ${d.usage?.total_tokens}`, "");
+  return L.join("\n");
+}
+</script>
+</body>
+</html>
